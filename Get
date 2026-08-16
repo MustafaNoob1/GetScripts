@@ -1,508 +1,557 @@
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local StarterPlayer = game:GetService("StarterPlayer")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local Workspace = game:GetService("Workspace")
 
-local LocalPlayer = Players.LocalPlayer
-
---------------------------------------------------
--- CONFIG
---------------------------------------------------
-
-local FOLDER = "BuffedGraffiti_RESCAN"
-
-local NAME_KEYWORDS = {
-    "paint",
-    "spray",
-    "graffiti",
-    "draw",
-    "drawing",
-    "brush",
-    "canvas",
-    "stroke",
-    "line",
-    "color",
-    "wall",
-    "decal",
-    "art",
-}
-
-local SOURCE_KEYWORDS = {
-    "FireServer",
-    "InvokeServer",
-
-    "Position0",
-    "Position1",
-    "BrushSize",
-    "PaintLayer",
-
-    "RaycastAtMouse",
-
-    "SprayPaint",
-    "Graffiti",
-    "PaintStroke",
-
-    "StrokeManager",
-    "DrawHandler",
-
-    "CurrentBrushSize",
-    "CurrentPaintLayer",
-    "CurrentColor",
-
-    "AddSprayToBatch",
-    "CreatePaintStroke",
-
-    "StartStroke",
-    "AddPoint",
-    "EndStroke",
-}
+local Player = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
 
 --------------------------------------------------
--- REQUIREMENTS
+-- CLEAN OLD GUI
 --------------------------------------------------
 
-if not writefile then
-    warn("[RESCAN] writefile() fehlt")
-    return
+local oldGui =
+    Player.PlayerGui:FindFirstChild("MSTJAutoPainter")
+
+if oldGui then
+    oldGui:Destroy()
 end
 
-if not decompile then
-    warn("[RESCAN] decompile() fehlt")
-    return
-end
+local oldPreview =
+    Workspace:FindFirstChild("MSTJ_AutoPainterPreview")
 
-if makefolder then
-    pcall(function()
-        makefolder(FOLDER)
-    end)
+if oldPreview then
+    oldPreview:Destroy()
 end
 
 --------------------------------------------------
--- OUTPUT
+-- STATE
 --------------------------------------------------
 
-local manifest = {}
+local Selected = nil
+local SelectMode = false
 
-local function log(...)
-    local args = {...}
-    local result = {}
-
-    for i, value in ipairs(args) do
-        result[i] = tostring(value)
-    end
-
-    local text = table.concat(result, " ")
-
-    table.insert(manifest, text)
-    print(text)
-end
+local PreviewWidth = 18
+local PreviewHeight = 6
 
 --------------------------------------------------
--- HELPERS
+-- PREVIEW FOLDER
 --------------------------------------------------
 
-local function sanitize(text)
-
-    text = tostring(text)
-
-    text = text:gsub("[^%w%._%-]", "_")
-
-    if #text > 150 then
-        text = text:sub(1, 150)
-    end
-
-    return text
-end
-
-local function nameInteresting(name)
-
-    local lower = string.lower(name)
-
-    for _, keyword in ipairs(NAME_KEYWORDS) do
-
-        if string.find(
-            lower,
-            string.lower(keyword),
-            1,
-            true
-        ) then
-
-            return true
-        end
-    end
-
-    return false
-end
-
-local function sourceInteresting(source)
-
-    local matches = {}
-
-    for _, keyword in ipairs(SOURCE_KEYWORDS) do
-
-        if string.find(
-            source,
-            keyword,
-            1,
-            true
-        ) then
-
-            table.insert(matches, keyword)
-        end
-    end
-
-    return #matches > 0, matches
-end
+local PreviewFolder = Instance.new("Folder")
+PreviewFolder.Name = "MSTJ_AutoPainterPreview"
+PreviewFolder.Parent = Workspace
 
 --------------------------------------------------
--- STORAGE
+-- GUI
 --------------------------------------------------
 
-local seen = {}
+local Gui = Instance.new("ScreenGui")
 
-local dumped = 0
-local checked = 0
+Gui.Name = "MSTJAutoPainter"
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = false
+Gui.Parent = Player.PlayerGui
 
---------------------------------------------------
--- DUMP FUNCTION
---------------------------------------------------
+local Main = Instance.new("Frame")
 
-local function checkScript(obj, reason)
+Main.Size = UDim2.fromOffset(310, 250)
+Main.Position = UDim2.fromOffset(30, 200)
 
-    if not obj then
-        return
-    end
+Main.BackgroundColor3 =
+    Color3.fromRGB(18, 18, 22)
 
-    if seen[obj] then
-        return
-    end
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Draggable = true
 
-    seen[obj] = true
+Main.Parent = Gui
 
-    if not (
-        obj:IsA("ModuleScript")
-        or obj:IsA("LocalScript")
-        or obj:IsA("Script")
-    ) then
-        return
-    end
+Instance.new(
+    "UICorner",
+    Main
+).CornerRadius = UDim.new(0, 12)
 
-    checked += 1
+local Stroke = Instance.new("UIStroke")
 
-    local nameHit =
-        nameInteresting(obj.Name)
+Stroke.Color =
+    Color3.fromRGB(70, 70, 80)
 
-    local ok, source =
-        pcall(function()
-
-            return decompile(obj)
-
-        end)
-
-    if not ok or type(source) ~= "string" then
-
-        if nameHit then
-
-            log(
-                "[DECOMPILE FAILED]",
-                obj.ClassName,
-                obj:GetFullName()
-            )
-
-        end
-
-        return
-    end
-
-    local sourceHit, matches =
-        sourceInteresting(source)
-
-    if not nameHit and not sourceHit then
-        return
-    end
-
-    dumped += 1
-
-    local filename =
-        string.format(
-            "%03d_%s.lua",
-            dumped,
-            sanitize(obj:GetFullName())
-        )
-
-    local path =
-        FOLDER .. "/" .. filename
-
-    local header =
-        "-- ORIGINAL PATH:\n"
-        .. "-- "
-        .. obj:GetFullName()
-        .. "\n\n"
-        .. "-- CLASS:\n"
-        .. "-- "
-        .. obj.ClassName
-        .. "\n\n"
-        .. "-- FOUND BECAUSE:\n"
-        .. "-- "
-        .. tostring(reason)
-        .. "\n\n"
-        .. "-- SOURCE KEYWORDS:\n"
-        .. "-- "
-        .. table.concat(matches, ", ")
-        .. "\n\n"
-
-    local success, err =
-        pcall(function()
-
-            writefile(
-                path,
-                header .. source
-            )
-
-        end)
-
-    if success then
-
-        log("")
-        log("[SCRIPT]", obj:GetFullName())
-        log(" File:", filename)
-        log(" Class:", obj.ClassName)
-        log(" NameMatch:", nameHit)
-        log(" Keywords:", table.concat(matches, ", "))
-        log(" Length:", #source)
-
-    else
-
-        log(
-            "[WRITE FAILED]",
-            filename,
-            err
-        )
-
-    end
-end
+Stroke.Thickness = 1.5
+Stroke.Parent = Main
 
 --------------------------------------------------
--- SCAN ROOT
+-- TITLE
 --------------------------------------------------
 
-local function scanRoot(root, description)
+local Title = Instance.new("TextLabel")
 
-    if not root then
-        return
-    end
+Title.Size =
+    UDim2.new(1, -20, 0, 36)
 
-    log("")
-    log("====================================")
-    log("SCANNING:", description)
-    log("PATH:", root:GetFullName())
-    log("====================================")
+Title.Position =
+    UDim2.fromOffset(10, 8)
 
-    checkScript(root, description)
+Title.BackgroundTransparency = 1
 
-    for _, obj in ipairs(root:GetDescendants()) do
+Title.Font =
+    Enum.Font.GothamBold
 
-        checkScript(
-            obj,
-            description
-        )
+Title.TextSize = 18
 
-    end
-end
+Title.TextColor3 =
+    Color3.fromRGB(240, 240, 245)
+
+Title.Text =
+    "MSTJ AUTO PAINTER"
+
+Title.Parent = Main
 
 --------------------------------------------------
--- STANDARD LOCATIONS
+-- STATUS
 --------------------------------------------------
 
-log("========================================")
-log("BUFFED GRAFFITI FULL RESCAN")
-log("========================================")
+local Status = Instance.new("TextLabel")
 
-scanRoot(
-    ReplicatedStorage,
-    "ReplicatedStorage"
+Status.Size =
+    UDim2.new(1, -20, 0, 42)
+
+Status.Position =
+    UDim2.fromOffset(10, 48)
+
+Status.BackgroundTransparency = 1
+
+Status.TextWrapped = true
+
+Status.Font =
+    Enum.Font.Gotham
+
+Status.TextSize = 13
+
+Status.TextColor3 =
+    Color3.fromRGB(170, 170, 180)
+
+Status.Text =
+    "Keine Wand ausgewählt"
+
+Status.Parent = Main
+
+--------------------------------------------------
+-- BUTTON CREATOR
+--------------------------------------------------
+
+local function createButton(
+    text,
+    y
 )
 
-if LocalPlayer then
+    local Button =
+        Instance.new("TextButton")
 
-    scanRoot(
-        LocalPlayer:FindFirstChild("PlayerScripts"),
-        "PlayerScripts"
+    Button.Size =
+        UDim2.new(1, -24, 0, 38)
+
+    Button.Position =
+        UDim2.fromOffset(12, y)
+
+    Button.BackgroundColor3 =
+        Color3.fromRGB(38, 38, 45)
+
+    Button.BorderSizePixel = 0
+
+    Button.Font =
+        Enum.Font.GothamBold
+
+    Button.TextSize = 13
+
+    Button.TextColor3 =
+        Color3.fromRGB(235, 235, 240)
+
+    Button.Text = text
+
+    Button.Parent = Main
+
+    Instance.new(
+        "UICorner",
+        Button
+    ).CornerRadius =
+        UDim.new(0, 8)
+
+    return Button
+end
+
+--------------------------------------------------
+-- BUTTONS
+--------------------------------------------------
+
+local SelectButton =
+    createButton(
+        "🎯 POSITION AUSWÄHLEN",
+        96
     )
 
-    scanRoot(
-        LocalPlayer:FindFirstChild("PlayerGui"),
-        "PlayerGui"
+local BiggerButton =
+    createButton(
+        "GRÖSSER",
+        140
+    )
+
+local SmallerButton =
+    createButton(
+        "KLEINER",
+        184
+    )
+
+--------------------------------------------------
+-- RAYCAST
+--------------------------------------------------
+
+local function raycastMouse()
+
+    local mousePosition =
+        UserInputService:GetMouseLocation()
+
+    local inset =
+        GuiService:GetGuiInset()
+
+    mousePosition =
+        mousePosition - inset
+
+    local ray =
+        Camera:ViewportPointToRay(
+            mousePosition.X,
+            mousePosition.Y
+        )
+
+    local params =
+        RaycastParams.new()
+
+    params.FilterType =
+        Enum.RaycastFilterType.Exclude
+
+    local ignore = {
+        PreviewFolder
+    }
+
+    if Player.Character then
+        table.insert(
+            ignore,
+            Player.Character
+        )
+    end
+
+    local sprayFolder =
+        Workspace:FindFirstChild(
+            "SprayPaint"
+        )
+
+    if sprayFolder then
+        table.insert(
+            ignore,
+            sprayFolder
+        )
+    end
+
+    params.FilterDescendantsInstances =
+        ignore
+
+    params.RespectCanCollide = false
+
+    return Workspace:Raycast(
+        ray.Origin,
+        ray.Direction * 500,
+        params
     )
 
 end
 
 --------------------------------------------------
--- LOADED MODULES
+-- WALL BASIS
 --------------------------------------------------
 
-log("")
-log("====================================")
-log("LOADED MODULES")
-log("====================================")
+local function makeBasis(normal)
 
-if getloadedmodules then
+    normal = normal.Unit
 
-    local ok, modules =
-        pcall(function()
+    local worldUp =
+        Vector3.new(0, 1, 0)
 
-            return getloadedmodules()
+    local right =
+        worldUp:Cross(normal)
 
-        end)
+    if right.Magnitude < 0.01 then
 
-    if ok and type(modules) == "table" then
+        right =
+            Camera.CFrame.RightVector
 
-        log(
-            "Loaded modules:",
-            #modules
-        )
-
-        for _, module in ipairs(modules) do
-
-            checkScript(
-                module,
-                "getloadedmodules"
-            )
-
-        end
-
-    else
-
-        log(
-            "getloadedmodules() failed"
-        )
+        right =
+            right
+            - normal
+            * right:Dot(normal)
 
     end
 
-else
+    right = right.Unit
 
-    log(
-        "getloadedmodules() unavailable"
-    )
+    local up =
+        normal:Cross(right).Unit
+
+    return right, up
 
 end
 
 --------------------------------------------------
--- ALL REMOTES
+-- PREVIEW LINE
 --------------------------------------------------
 
-log("")
-log("====================================")
-log("REMOTE EVENTS / FUNCTIONS")
-log("====================================")
+local function previewLine(a, b)
 
-local remoteCount = 0
+    local delta =
+        b - a
 
-for _, obj in ipairs(game:GetDescendants()) do
+    local length =
+        delta.Magnitude
 
-    local class = obj.ClassName
-
-    if
-        class == "RemoteEvent"
-        or class == "RemoteFunction"
-        or class == "UnreliableRemoteEvent"
-    then
-
-        remoteCount += 1
-
-        local interesting =
-            nameInteresting(obj.Name)
-
-        if interesting then
-
-            log(
-                "[REMOTE *]",
-                class,
-                obj:GetFullName()
-            )
-
-        else
-
-            log(
-                "[REMOTE]",
-                class,
-                obj:GetFullName()
-            )
-
-        end
+    if length < 0.001 then
+        return
     end
+
+    local part =
+        Instance.new("Part")
+
+    part.Name =
+        "PreviewLine"
+
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanQuery = false
+    part.CanTouch = false
+
+    part.Material =
+        Enum.Material.Neon
+
+    part.Color =
+        Color3.fromRGB(
+            80,
+            255,
+            130
+        )
+
+    part.Transparency = 0.15
+
+    part.Size =
+        Vector3.new(
+            0.07,
+            0.07,
+            length
+        )
+
+    part.CFrame =
+        CFrame.lookAt(
+            (a + b) / 2,
+            b
+        )
+
+    part.Parent =
+        PreviewFolder
+
 end
 
 --------------------------------------------------
--- SUMMARY
+-- UPDATE PREVIEW
 --------------------------------------------------
 
-log("")
-log("========================================")
-log("RESCAN FINISHED")
-log("========================================")
+local function updatePreview()
 
-log(
-    "Scripts checked:",
-    checked
-)
+    PreviewFolder:ClearAllChildren()
 
-log(
-    "Relevant scripts dumped:",
-    dumped
-)
+    if not Selected then
+        return
+    end
 
-log(
-    "Remotes found:",
-    remoteCount
-)
+    local center =
+        Selected.Position
+        + Selected.Normal * 0.04
 
---------------------------------------------------
--- SAVE MANIFEST
---------------------------------------------------
+    local right =
+        Selected.Right
 
-local manifestText =
-    table.concat(
-        manifest,
-        "\n"
-    )
+    local up =
+        Selected.Up
 
-writefile(
-    FOLDER .. "/Manifest.txt",
-    manifestText
-)
+    local halfW =
+        PreviewWidth / 2
 
---------------------------------------------------
--- ALSO COPY MANIFEST
---------------------------------------------------
+    local halfH =
+        PreviewHeight / 2
 
-if setclipboard then
+    local tl =
+        center
+        - right * halfW
+        + up * halfH
 
-    pcall(function()
+    local tr =
+        center
+        + right * halfW
+        + up * halfH
 
-        setclipboard(
-            manifestText
-        )
+    local bl =
+        center
+        - right * halfW
+        - up * halfH
 
-    end)
+    local br =
+        center
+        + right * halfW
+        - up * halfH
 
-elseif toclipboard then
-
-    pcall(function()
-
-        toclipboard(
-            manifestText
-        )
-
-    end)
+    previewLine(tl, tr)
+    previewLine(tr, br)
+    previewLine(br, bl)
+    previewLine(bl, tl)
 
 end
 
-print("")
+--------------------------------------------------
+-- SELECT BUTTON
+--------------------------------------------------
+
+SelectButton.MouseButton1Click:Connect(
+    function()
+
+        SelectMode = true
+
+        Status.Text =
+            "Klicke jetzt auf die Wand..."
+
+        Status.TextColor3 =
+            Color3.fromRGB(
+                255,
+                210,
+                90
+            )
+
+    end
+)
+
+--------------------------------------------------
+-- WORLD CLICK
+--------------------------------------------------
+
+UserInputService.InputBegan:Connect(
+    function(input, processed)
+
+        if processed then
+            return
+        end
+
+        if not SelectMode then
+            return
+        end
+
+        if input.UserInputType
+            ~= Enum.UserInputType.MouseButton1 then
+            return
+        end
+
+        local result =
+            raycastMouse()
+
+        if not result then
+
+            Status.Text =
+                "Keine Oberfläche getroffen"
+
+            return
+        end
+
+        local right, up =
+            makeBasis(
+                result.Normal
+            )
+
+        Selected = {
+
+            Position =
+                result.Position,
+
+            Normal =
+                result.Normal.Unit,
+
+            Right =
+                right,
+
+            Up =
+                up,
+
+            Part =
+                result.Instance
+
+        }
+
+        SelectMode = false
+
+        updatePreview()
+
+        Status.Text =
+            "✓ Position gespeichert\n"
+            .. result.Instance.Name
+
+        Status.TextColor3 =
+            Color3.fromRGB(
+                100,
+                255,
+                140
+            )
+
+        print(
+            "[MSTJ] WALL SELECTED"
+        )
+
+        print(
+            "Part:",
+            Selected.Part:GetFullName()
+        )
+
+        print(
+            "Position:",
+            Selected.Position
+        )
+
+        print(
+            "Normal:",
+            Selected.Normal
+        )
+
+    end
+)
+
+--------------------------------------------------
+-- SIZE
+--------------------------------------------------
+
+BiggerButton.MouseButton1Click:Connect(
+    function()
+
+        PreviewWidth *= 1.15
+        PreviewHeight *= 1.15
+
+        updatePreview()
+
+    end
+)
+
+SmallerButton.MouseButton1Click:Connect(
+    function()
+
+        PreviewWidth *= 0.87
+        PreviewHeight *= 0.87
+
+        updatePreview()
+
+    end
+)
+
 print(
-    "[RESCAN] Fertig:",
-    FOLDER
-)
-
-print(
-    "[RESCAN] Lade Manifest.txt + die relevanten Lua-Dateien hier hoch."
+    "[MSTJ AUTO PAINTER] Selector loaded"
 )
