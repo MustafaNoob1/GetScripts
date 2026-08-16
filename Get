@@ -7,7 +7,7 @@ local Player = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
 --------------------------------------------------
--- CLEAN OLD GUI
+-- CLEANUP
 --------------------------------------------------
 
 local oldGui =
@@ -31,11 +31,14 @@ end
 local Selected = nil
 local SelectMode = false
 
-local PreviewWidth = 18
-local PreviewHeight = 6
+local Scale = 1
+local Rotation = 0
+
+local BaseWidth = 18
+local BaseHeight = 7
 
 --------------------------------------------------
--- PREVIEW FOLDER
+-- PREVIEW
 --------------------------------------------------
 
 local PreviewFolder = Instance.new("Folder")
@@ -43,42 +46,139 @@ PreviewFolder.Name = "MSTJ_AutoPainterPreview"
 PreviewFolder.Parent = Workspace
 
 --------------------------------------------------
+-- MSTJ VECTOR DATA
+--
+-- normalized:
+-- x = -0.5 -> +0.5
+-- y = -0.5 -> +0.5
+--------------------------------------------------
+
+local ART = {
+
+    --------------------------------------------------
+    -- M
+    --------------------------------------------------
+
+    {
+        {-0.48, -0.38},
+        {-0.48,  0.38},
+        {-0.39,  0.38},
+        {-0.30, -0.05},
+        {-0.21,  0.38},
+        {-0.12,  0.38},
+        {-0.12, -0.38},
+    },
+
+    --------------------------------------------------
+    -- S
+    --------------------------------------------------
+
+    {
+        { 0.00,  0.30},
+        {-0.05,  0.38},
+        {-0.13,  0.38},
+        {-0.17,  0.28},
+        {-0.14,  0.12},
+        {-0.03,  0.04},
+        { 0.08, -0.04},
+        { 0.11, -0.20},
+        { 0.07, -0.34},
+        {-0.03, -0.39},
+        {-0.14, -0.35},
+        {-0.18, -0.26},
+    },
+
+    --------------------------------------------------
+    -- T
+    --------------------------------------------------
+
+    {
+        { 0.11, 0.38},
+        { 0.37, 0.38},
+    },
+
+    {
+        { 0.24, 0.38},
+        { 0.24, -0.38},
+    },
+
+    --------------------------------------------------
+    -- J
+    --------------------------------------------------
+
+    {
+        { 0.34, 0.38},
+        { 0.49, 0.38},
+    },
+
+    {
+        { 0.43, 0.38},
+        { 0.43, -0.23},
+        { 0.38, -0.36},
+        { 0.29, -0.39},
+        { 0.23, -0.31},
+    },
+
+    --------------------------------------------------
+    -- graffiti accent
+    --------------------------------------------------
+
+    {
+        {-0.50, -0.47},
+        {-0.28, -0.42},
+        {-0.05, -0.46},
+        { 0.18, -0.42},
+        { 0.48, -0.47},
+    },
+
+    --------------------------------------------------
+    -- small arrow
+    --------------------------------------------------
+
+    {
+        {0.38, 0.47},
+        {0.49, 0.43},
+        {0.43, 0.34},
+    }
+}
+
+--------------------------------------------------
 -- GUI
 --------------------------------------------------
 
 local Gui = Instance.new("ScreenGui")
-
 Gui.Name = "MSTJAutoPainter"
 Gui.ResetOnSpawn = false
-Gui.IgnoreGuiInset = false
 Gui.Parent = Player.PlayerGui
 
 local Main = Instance.new("Frame")
 
-Main.Size = UDim2.fromOffset(310, 250)
-Main.Position = UDim2.fromOffset(30, 200)
+Main.Size =
+    UDim2.fromOffset(330, 370)
+
+Main.Position =
+    UDim2.fromOffset(30, 170)
 
 Main.BackgroundColor3 =
     Color3.fromRGB(18, 18, 22)
 
 Main.BorderSizePixel = 0
+
 Main.Active = true
 Main.Draggable = true
-
 Main.Parent = Gui
 
-Instance.new(
-    "UICorner",
-    Main
-).CornerRadius = UDim.new(0, 12)
+Instance.new("UICorner", Main).CornerRadius =
+    UDim.new(0, 12)
 
-local Stroke = Instance.new("UIStroke")
+local MainStroke =
+    Instance.new("UIStroke")
 
-Stroke.Color =
-    Color3.fromRGB(70, 70, 80)
+MainStroke.Color =
+    Color3.fromRGB(75, 75, 85)
 
-Stroke.Thickness = 1.5
-Stroke.Parent = Main
+MainStroke.Thickness = 1.5
+MainStroke.Parent = Main
 
 --------------------------------------------------
 -- TITLE
@@ -87,10 +187,10 @@ Stroke.Parent = Main
 local Title = Instance.new("TextLabel")
 
 Title.Size =
-    UDim2.new(1, -20, 0, 36)
+    UDim2.new(1, -20, 0, 34)
 
 Title.Position =
-    UDim2.fromOffset(10, 8)
+    UDim2.fromOffset(10, 7)
 
 Title.BackgroundTransparency = 1
 
@@ -100,7 +200,7 @@ Title.Font =
 Title.TextSize = 18
 
 Title.TextColor3 =
-    Color3.fromRGB(240, 240, 245)
+    Color3.fromRGB(245, 245, 250)
 
 Title.Text =
     "MSTJ AUTO PAINTER"
@@ -114,19 +214,19 @@ Title.Parent = Main
 local Status = Instance.new("TextLabel")
 
 Status.Size =
-    UDim2.new(1, -20, 0, 42)
+    UDim2.new(1, -20, 0, 40)
 
 Status.Position =
-    UDim2.fromOffset(10, 48)
+    UDim2.fromOffset(10, 43)
 
 Status.BackgroundTransparency = 1
-
-Status.TextWrapped = true
 
 Status.Font =
     Enum.Font.Gotham
 
-Status.TextSize = 13
+Status.TextSize = 12
+
+Status.TextWrapped = true
 
 Status.TextColor3 =
     Color3.fromRGB(170, 170, 180)
@@ -137,70 +237,162 @@ Status.Text =
 Status.Parent = Main
 
 --------------------------------------------------
--- BUTTON CREATOR
+-- BUTTON
 --------------------------------------------------
 
-local function createButton(
-    text,
-    y
-)
+local function button(text, x, y, w)
 
-    local Button =
-        Instance.new("TextButton")
+    local b = Instance.new("TextButton")
 
-    Button.Size =
-        UDim2.new(1, -24, 0, 38)
+    b.Size =
+        UDim2.fromOffset(w or 145, 38)
 
-    Button.Position =
-        UDim2.fromOffset(12, y)
+    b.Position =
+        UDim2.fromOffset(x, y)
 
-    Button.BackgroundColor3 =
-        Color3.fromRGB(38, 38, 45)
+    b.BackgroundColor3 =
+        Color3.fromRGB(38, 38, 46)
 
-    Button.BorderSizePixel = 0
+    b.BorderSizePixel = 0
 
-    Button.Font =
+    b.Font =
         Enum.Font.GothamBold
 
-    Button.TextSize = 13
+    b.TextSize = 12
 
-    Button.TextColor3 =
+    b.TextColor3 =
         Color3.fromRGB(235, 235, 240)
 
-    Button.Text = text
+    b.Text = text
 
-    Button.Parent = Main
+    b.Parent = Main
 
-    Instance.new(
-        "UICorner",
-        Button
-    ).CornerRadius =
+    Instance.new("UICorner", b).CornerRadius =
         UDim.new(0, 8)
 
-    return Button
+    return b
 end
 
 --------------------------------------------------
--- BUTTONS
+-- CONTROLS
 --------------------------------------------------
 
 local SelectButton =
-    createButton(
+    button(
         "🎯 POSITION AUSWÄHLEN",
-        96
+        12,
+        92,
+        306
     )
 
-local BiggerButton =
-    createButton(
-        "GRÖSSER",
-        140
+local Smaller =
+    button(
+        "− GRÖSSE",
+        12,
+        142,
+        145
     )
 
-local SmallerButton =
-    createButton(
-        "KLEINER",
-        184
+local Bigger =
+    button(
+        "+ GRÖSSE",
+        173,
+        142,
+        145
     )
+
+local RotateLeft =
+    button(
+        "↶ -5°",
+        12,
+        190,
+        145
+    )
+
+local RotateRight =
+    button(
+        "↷ +5°",
+        173,
+        190,
+        145
+    )
+
+local Reset =
+    button(
+        "RESET TRANSFORM",
+        12,
+        238,
+        306
+    )
+
+--------------------------------------------------
+-- INFO
+--------------------------------------------------
+
+local TransformInfo =
+    Instance.new("TextLabel")
+
+TransformInfo.Size =
+    UDim2.new(1, -24, 0, 35)
+
+TransformInfo.Position =
+    UDim2.fromOffset(12, 285)
+
+TransformInfo.BackgroundTransparency = 1
+
+TransformInfo.Font =
+    Enum.Font.GothamMedium
+
+TransformInfo.TextSize = 12
+
+TransformInfo.TextColor3 =
+    Color3.fromRGB(160, 160, 175)
+
+TransformInfo.Parent = Main
+
+--------------------------------------------------
+-- FUTURE BUTTONS
+--------------------------------------------------
+
+local StartButton =
+    button(
+        "▶ START MSTJ",
+        12,
+        324,
+        145
+    )
+
+local StopButton =
+    button(
+        "■ STOP",
+        173,
+        324,
+        145
+    )
+
+StartButton.BackgroundColor3 =
+    Color3.fromRGB(35, 80, 50)
+
+StopButton.BackgroundColor3 =
+    Color3.fromRGB(90, 40, 40)
+
+--------------------------------------------------
+-- DISABLED FOR NOW
+--------------------------------------------------
+
+StartButton.MouseButton1Click:Connect(function()
+
+    Status.Text =
+        "Malen kommt im nächsten Schritt."
+
+end)
+
+StopButton.MouseButton1Click:Connect(function()
+
+    Status.Text =
+        "Noch kein Paint-Prozess aktiv."
+
+end)
 
 --------------------------------------------------
 -- RAYCAST
@@ -208,19 +400,18 @@ local SmallerButton =
 
 local function raycastMouse()
 
-    local mousePosition =
+    local mouse =
         UserInputService:GetMouseLocation()
 
     local inset =
         GuiService:GetGuiInset()
 
-    mousePosition =
-        mousePosition - inset
+    mouse -= inset
 
     local ray =
         Camera:ViewportPointToRay(
-            mousePosition.X,
-            mousePosition.Y
+            mouse.X,
+            mouse.Y
         )
 
     local params =
@@ -234,22 +425,26 @@ local function raycastMouse()
     }
 
     if Player.Character then
+
         table.insert(
             ignore,
             Player.Character
         )
+
     end
 
-    local sprayFolder =
+    local spray =
         Workspace:FindFirstChild(
             "SprayPaint"
         )
 
-    if sprayFolder then
+    if spray then
+
         table.insert(
             ignore,
-            sprayFolder
+            spray
         )
+
     end
 
     params.FilterDescendantsInstances =
@@ -301,7 +496,55 @@ local function makeBasis(normal)
 end
 
 --------------------------------------------------
--- PREVIEW LINE
+-- ROTATED BASIS
+--------------------------------------------------
+
+local function getRotatedBasis()
+
+    local angle =
+        math.rad(Rotation)
+
+    local right =
+        Selected.Right
+        * math.cos(angle)
+        + Selected.Up
+        * math.sin(angle)
+
+    local up =
+        Selected.Up
+        * math.cos(angle)
+        - Selected.Right
+        * math.sin(angle)
+
+    return right, up
+
+end
+
+--------------------------------------------------
+-- LOCAL 2D -> WORLD
+--------------------------------------------------
+
+local function toWorld(x, y)
+
+    local right, up =
+        getRotatedBasis()
+
+    local width =
+        BaseWidth * Scale
+
+    local height =
+        BaseHeight * Scale
+
+    return
+        Selected.Position
+        + Selected.Normal * 0.045
+        + right * (x * width)
+        + up * (y * height)
+
+end
+
+--------------------------------------------------
+-- PREVIEW SEGMENT
 --------------------------------------------------
 
 local function previewLine(a, b)
@@ -316,123 +559,116 @@ local function previewLine(a, b)
         return
     end
 
-    local part =
+    local line =
         Instance.new("Part")
 
-    part.Name =
-        "PreviewLine"
+    line.Name =
+        "MSTJPreviewLine"
 
-    part.Anchored = true
-    part.CanCollide = false
-    part.CanQuery = false
-    part.CanTouch = false
+    line.Anchored = true
+    line.CanCollide = false
+    line.CanQuery = false
+    line.CanTouch = false
 
-    part.Material =
+    line.CastShadow = false
+
+    line.Material =
         Enum.Material.Neon
 
-    part.Color =
+    line.Color =
         Color3.fromRGB(
-            80,
-            255,
-            130
+            176,
+            75,
+            255
         )
 
-    part.Transparency = 0.15
+    line.Transparency =
+        0.18
 
-    part.Size =
+    line.Size =
         Vector3.new(
-            0.07,
-            0.07,
+            0.14 * Scale,
+            0.14 * Scale,
             length
         )
 
-    part.CFrame =
+    line.CFrame =
         CFrame.lookAt(
             (a + b) / 2,
-            b
+            b,
+            Selected.Normal
         )
 
-    part.Parent =
+    line.Parent =
         PreviewFolder
 
 end
 
 --------------------------------------------------
--- UPDATE PREVIEW
+-- DRAW ART PREVIEW
 --------------------------------------------------
 
 local function updatePreview()
 
     PreviewFolder:ClearAllChildren()
 
+    TransformInfo.Text =
+        string.format(
+            "Größe: %d%%     Rotation: %d°",
+            math.floor(Scale * 100),
+            Rotation
+        )
+
     if not Selected then
         return
     end
 
-    local center =
-        Selected.Position
-        + Selected.Normal * 0.04
+    for _, stroke in ipairs(ART) do
 
-    local right =
-        Selected.Right
+        for i = 1, #stroke - 1 do
 
-    local up =
-        Selected.Up
+            local p0 =
+                stroke[i]
 
-    local halfW =
-        PreviewWidth / 2
+            local p1 =
+                stroke[i + 1]
 
-    local halfH =
-        PreviewHeight / 2
+            previewLine(
+                toWorld(
+                    p0[1],
+                    p0[2]
+                ),
+                toWorld(
+                    p1[1],
+                    p1[2]
+                )
+            )
 
-    local tl =
-        center
-        - right * halfW
-        + up * halfH
+        end
 
-    local tr =
-        center
-        + right * halfW
-        + up * halfH
-
-    local bl =
-        center
-        - right * halfW
-        - up * halfH
-
-    local br =
-        center
-        + right * halfW
-        - up * halfH
-
-    previewLine(tl, tr)
-    previewLine(tr, br)
-    previewLine(br, bl)
-    previewLine(bl, tl)
+    end
 
 end
 
 --------------------------------------------------
--- SELECT BUTTON
+-- SELECT
 --------------------------------------------------
 
-SelectButton.MouseButton1Click:Connect(
-    function()
+SelectButton.MouseButton1Click:Connect(function()
 
-        SelectMode = true
+    SelectMode = true
 
-        Status.Text =
-            "Klicke jetzt auf die Wand..."
+    Status.Text =
+        "Klicke jetzt auf die gewünschte Wand..."
 
-        Status.TextColor3 =
-            Color3.fromRGB(
-                255,
-                210,
-                90
-            )
+    Status.TextColor3 =
+        Color3.fromRGB(
+            255,
+            210,
+            90
+        )
 
-    end
-)
+end)
 
 --------------------------------------------------
 -- WORLD CLICK
@@ -451,32 +687,33 @@ UserInputService.InputBegan:Connect(
 
         if input.UserInputType
             ~= Enum.UserInputType.MouseButton1 then
+
             return
+
         end
 
-        local result =
+        local hit =
             raycastMouse()
 
-        if not result then
+        if not hit then
 
             Status.Text =
                 "Keine Oberfläche getroffen"
 
             return
+
         end
 
         local right, up =
-            makeBasis(
-                result.Normal
-            )
+            makeBasis(hit.Normal)
 
         Selected = {
 
             Position =
-                result.Position,
+                hit.Position,
 
             Normal =
-                result.Normal.Unit,
+                hit.Normal.Unit,
 
             Right =
                 right,
@@ -485,17 +722,15 @@ UserInputService.InputBegan:Connect(
                 up,
 
             Part =
-                result.Instance
+                hit.Instance
 
         }
 
         SelectMode = false
 
-        updatePreview()
-
         Status.Text =
-            "✓ Position gespeichert\n"
-            .. result.Instance.Name
+            "✓ MSTJ Position gespeichert\n"
+            .. hit.Instance.Name
 
         Status.TextColor3 =
             Color3.fromRGB(
@@ -504,24 +739,7 @@ UserInputService.InputBegan:Connect(
                 140
             )
 
-        print(
-            "[MSTJ] WALL SELECTED"
-        )
-
-        print(
-            "Part:",
-            Selected.Part:GetFullName()
-        )
-
-        print(
-            "Position:",
-            Selected.Position
-        )
-
-        print(
-            "Normal:",
-            Selected.Normal
-        )
+        updatePreview()
 
     end
 )
@@ -530,28 +748,69 @@ UserInputService.InputBegan:Connect(
 -- SIZE
 --------------------------------------------------
 
-BiggerButton.MouseButton1Click:Connect(
-    function()
+Smaller.MouseButton1Click:Connect(function()
 
-        PreviewWidth *= 1.15
-        PreviewHeight *= 1.15
+    Scale =
+        math.max(
+            0.25,
+            Scale - 0.1
+        )
 
-        updatePreview()
+    updatePreview()
 
-    end
-)
+end)
 
-SmallerButton.MouseButton1Click:Connect(
-    function()
+Bigger.MouseButton1Click:Connect(function()
 
-        PreviewWidth *= 0.87
-        PreviewHeight *= 0.87
+    Scale =
+        math.min(
+            3,
+            Scale + 0.1
+        )
 
-        updatePreview()
+    updatePreview()
 
-    end
-)
+end)
+
+--------------------------------------------------
+-- ROTATION
+--------------------------------------------------
+
+RotateLeft.MouseButton1Click:Connect(function()
+
+    Rotation -= 5
+
+    updatePreview()
+
+end)
+
+RotateRight.MouseButton1Click:Connect(function()
+
+    Rotation += 5
+
+    updatePreview()
+
+end)
+
+--------------------------------------------------
+-- RESET
+--------------------------------------------------
+
+Reset.MouseButton1Click:Connect(function()
+
+    Scale = 1
+    Rotation = 0
+
+    updatePreview()
+
+end)
+
+--------------------------------------------------
+-- INITIAL INFO
+--------------------------------------------------
+
+updatePreview()
 
 print(
-    "[MSTJ AUTO PAINTER] Selector loaded"
+    "[MSTJ AUTO PAINTER] Vector preview loaded"
 )
