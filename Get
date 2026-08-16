@@ -1,0 +1,508 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
+
+local LocalPlayer = Players.LocalPlayer
+
+--------------------------------------------------
+-- CONFIG
+--------------------------------------------------
+
+local FOLDER = "BuffedGraffiti_RESCAN"
+
+local NAME_KEYWORDS = {
+    "paint",
+    "spray",
+    "graffiti",
+    "draw",
+    "drawing",
+    "brush",
+    "canvas",
+    "stroke",
+    "line",
+    "color",
+    "wall",
+    "decal",
+    "art",
+}
+
+local SOURCE_KEYWORDS = {
+    "FireServer",
+    "InvokeServer",
+
+    "Position0",
+    "Position1",
+    "BrushSize",
+    "PaintLayer",
+
+    "RaycastAtMouse",
+
+    "SprayPaint",
+    "Graffiti",
+    "PaintStroke",
+
+    "StrokeManager",
+    "DrawHandler",
+
+    "CurrentBrushSize",
+    "CurrentPaintLayer",
+    "CurrentColor",
+
+    "AddSprayToBatch",
+    "CreatePaintStroke",
+
+    "StartStroke",
+    "AddPoint",
+    "EndStroke",
+}
+
+--------------------------------------------------
+-- REQUIREMENTS
+--------------------------------------------------
+
+if not writefile then
+    warn("[RESCAN] writefile() fehlt")
+    return
+end
+
+if not decompile then
+    warn("[RESCAN] decompile() fehlt")
+    return
+end
+
+if makefolder then
+    pcall(function()
+        makefolder(FOLDER)
+    end)
+end
+
+--------------------------------------------------
+-- OUTPUT
+--------------------------------------------------
+
+local manifest = {}
+
+local function log(...)
+    local args = {...}
+    local result = {}
+
+    for i, value in ipairs(args) do
+        result[i] = tostring(value)
+    end
+
+    local text = table.concat(result, " ")
+
+    table.insert(manifest, text)
+    print(text)
+end
+
+--------------------------------------------------
+-- HELPERS
+--------------------------------------------------
+
+local function sanitize(text)
+
+    text = tostring(text)
+
+    text = text:gsub("[^%w%._%-]", "_")
+
+    if #text > 150 then
+        text = text:sub(1, 150)
+    end
+
+    return text
+end
+
+local function nameInteresting(name)
+
+    local lower = string.lower(name)
+
+    for _, keyword in ipairs(NAME_KEYWORDS) do
+
+        if string.find(
+            lower,
+            string.lower(keyword),
+            1,
+            true
+        ) then
+
+            return true
+        end
+    end
+
+    return false
+end
+
+local function sourceInteresting(source)
+
+    local matches = {}
+
+    for _, keyword in ipairs(SOURCE_KEYWORDS) do
+
+        if string.find(
+            source,
+            keyword,
+            1,
+            true
+        ) then
+
+            table.insert(matches, keyword)
+        end
+    end
+
+    return #matches > 0, matches
+end
+
+--------------------------------------------------
+-- STORAGE
+--------------------------------------------------
+
+local seen = {}
+
+local dumped = 0
+local checked = 0
+
+--------------------------------------------------
+-- DUMP FUNCTION
+--------------------------------------------------
+
+local function checkScript(obj, reason)
+
+    if not obj then
+        return
+    end
+
+    if seen[obj] then
+        return
+    end
+
+    seen[obj] = true
+
+    if not (
+        obj:IsA("ModuleScript")
+        or obj:IsA("LocalScript")
+        or obj:IsA("Script")
+    ) then
+        return
+    end
+
+    checked += 1
+
+    local nameHit =
+        nameInteresting(obj.Name)
+
+    local ok, source =
+        pcall(function()
+
+            return decompile(obj)
+
+        end)
+
+    if not ok or type(source) ~= "string" then
+
+        if nameHit then
+
+            log(
+                "[DECOMPILE FAILED]",
+                obj.ClassName,
+                obj:GetFullName()
+            )
+
+        end
+
+        return
+    end
+
+    local sourceHit, matches =
+        sourceInteresting(source)
+
+    if not nameHit and not sourceHit then
+        return
+    end
+
+    dumped += 1
+
+    local filename =
+        string.format(
+            "%03d_%s.lua",
+            dumped,
+            sanitize(obj:GetFullName())
+        )
+
+    local path =
+        FOLDER .. "/" .. filename
+
+    local header =
+        "-- ORIGINAL PATH:\n"
+        .. "-- "
+        .. obj:GetFullName()
+        .. "\n\n"
+        .. "-- CLASS:\n"
+        .. "-- "
+        .. obj.ClassName
+        .. "\n\n"
+        .. "-- FOUND BECAUSE:\n"
+        .. "-- "
+        .. tostring(reason)
+        .. "\n\n"
+        .. "-- SOURCE KEYWORDS:\n"
+        .. "-- "
+        .. table.concat(matches, ", ")
+        .. "\n\n"
+
+    local success, err =
+        pcall(function()
+
+            writefile(
+                path,
+                header .. source
+            )
+
+        end)
+
+    if success then
+
+        log("")
+        log("[SCRIPT]", obj:GetFullName())
+        log(" File:", filename)
+        log(" Class:", obj.ClassName)
+        log(" NameMatch:", nameHit)
+        log(" Keywords:", table.concat(matches, ", "))
+        log(" Length:", #source)
+
+    else
+
+        log(
+            "[WRITE FAILED]",
+            filename,
+            err
+        )
+
+    end
+end
+
+--------------------------------------------------
+-- SCAN ROOT
+--------------------------------------------------
+
+local function scanRoot(root, description)
+
+    if not root then
+        return
+    end
+
+    log("")
+    log("====================================")
+    log("SCANNING:", description)
+    log("PATH:", root:GetFullName())
+    log("====================================")
+
+    checkScript(root, description)
+
+    for _, obj in ipairs(root:GetDescendants()) do
+
+        checkScript(
+            obj,
+            description
+        )
+
+    end
+end
+
+--------------------------------------------------
+-- STANDARD LOCATIONS
+--------------------------------------------------
+
+log("========================================")
+log("BUFFED GRAFFITI FULL RESCAN")
+log("========================================")
+
+scanRoot(
+    ReplicatedStorage,
+    "ReplicatedStorage"
+)
+
+if LocalPlayer then
+
+    scanRoot(
+        LocalPlayer:FindFirstChild("PlayerScripts"),
+        "PlayerScripts"
+    )
+
+    scanRoot(
+        LocalPlayer:FindFirstChild("PlayerGui"),
+        "PlayerGui"
+    )
+
+end
+
+--------------------------------------------------
+-- LOADED MODULES
+--------------------------------------------------
+
+log("")
+log("====================================")
+log("LOADED MODULES")
+log("====================================")
+
+if getloadedmodules then
+
+    local ok, modules =
+        pcall(function()
+
+            return getloadedmodules()
+
+        end)
+
+    if ok and type(modules) == "table" then
+
+        log(
+            "Loaded modules:",
+            #modules
+        )
+
+        for _, module in ipairs(modules) do
+
+            checkScript(
+                module,
+                "getloadedmodules"
+            )
+
+        end
+
+    else
+
+        log(
+            "getloadedmodules() failed"
+        )
+
+    end
+
+else
+
+    log(
+        "getloadedmodules() unavailable"
+    )
+
+end
+
+--------------------------------------------------
+-- ALL REMOTES
+--------------------------------------------------
+
+log("")
+log("====================================")
+log("REMOTE EVENTS / FUNCTIONS")
+log("====================================")
+
+local remoteCount = 0
+
+for _, obj in ipairs(game:GetDescendants()) do
+
+    local class = obj.ClassName
+
+    if
+        class == "RemoteEvent"
+        or class == "RemoteFunction"
+        or class == "UnreliableRemoteEvent"
+    then
+
+        remoteCount += 1
+
+        local interesting =
+            nameInteresting(obj.Name)
+
+        if interesting then
+
+            log(
+                "[REMOTE *]",
+                class,
+                obj:GetFullName()
+            )
+
+        else
+
+            log(
+                "[REMOTE]",
+                class,
+                obj:GetFullName()
+            )
+
+        end
+    end
+end
+
+--------------------------------------------------
+-- SUMMARY
+--------------------------------------------------
+
+log("")
+log("========================================")
+log("RESCAN FINISHED")
+log("========================================")
+
+log(
+    "Scripts checked:",
+    checked
+)
+
+log(
+    "Relevant scripts dumped:",
+    dumped
+)
+
+log(
+    "Remotes found:",
+    remoteCount
+)
+
+--------------------------------------------------
+-- SAVE MANIFEST
+--------------------------------------------------
+
+local manifestText =
+    table.concat(
+        manifest,
+        "\n"
+    )
+
+writefile(
+    FOLDER .. "/Manifest.txt",
+    manifestText
+)
+
+--------------------------------------------------
+-- ALSO COPY MANIFEST
+--------------------------------------------------
+
+if setclipboard then
+
+    pcall(function()
+
+        setclipboard(
+            manifestText
+        )
+
+    end)
+
+elseif toclipboard then
+
+    pcall(function()
+
+        toclipboard(
+            manifestText
+        )
+
+    end)
+
+end
+
+print("")
+print(
+    "[RESCAN] Fertig:",
+    FOLDER
+)
+
+print(
+    "[RESCAN] Lade Manifest.txt + die relevanten Lua-Dateien hier hoch."
+)
