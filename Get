@@ -1,6 +1,6 @@
-warn("[BestRating] V1 loaded")
+warn("[BestRating] V2 SAFE loaded")
 
--- Best Rating Optimizer V1
+-- Best Rating Optimizer V2 SAFE
 -- Game detected from the supplied dump: START YOUR SOCCER CAREER!
 -- Uses the game's own ReplicatedStorage.DayFoot.Config + Events data.
 -- It does NOT change ratingDelta, roll chances, or server data.
@@ -20,19 +20,34 @@ BR.Alive = true
 BR.AutoChoice = false
 BR.AutoIdentity = false
 BR.FocusMode = "Rating Focus"
-BR.RiskMode = "Expected Value"
+BR.RiskMode = "Never Minus"
 BR.PositionMode = "Auto"
+BR.SkipPaidWhenMoneyUnknown = true
 BR.ScanDelay = 0.18
 BR.LastClickAt = 0
 BR.LastClickButton = nil
+BR.ClickLockUntil = 0
 BR.LastBest = nil
 BR.LastStatsScan = 0
 BR.Stats = nil
 BR.StatsOwner = nil
+BR.CurrentMoney = nil
+BR.MoneySource = "-"
 BR.DetectedPosition = nil
 BR.ChoiceIndex = {}
+BR.EventTitleIndex = {}
+BR.EventById = {}
 BR.TranslationIndex = {}
 BR.IdentityBest = nil
+BR.BlockedChoiceUntil = {}
+BR.LastScanInfo = {
+    Known = 0,
+    Affordable = 0,
+    Unaffordable = 0,
+    Disabled = 0,
+    Blocked = 0,
+    Event = nil
+}
 
 BR.Players = game:GetService("Players")
 BR.ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -129,6 +144,9 @@ function BR.walkEvents(node, parentEvent, seen)
         and type(node.choices) == "table" then
         nextEvent = node
 
+        BR.EventById[tostring(node.id)] = node
+        BR.EventTitleIndex[BR.norm(node.title)] = node
+
         for _, choice in ipairs(node.choices) do
             BR.registerChoice(choice, node)
         end
@@ -211,6 +229,22 @@ function BR.resolveChoiceText(text)
     return nil
 end
 
+function BR.resolveEventTitle(text)
+    local key = BR.norm(text)
+    local direct = BR.EventTitleIndex[key]
+
+    if direct then
+        return direct
+    end
+
+    local english = BR.TranslationIndex[key]
+    if english then
+        return BR.EventTitleIndex[english]
+    end
+
+    return nil
+end
+
 --------------------------------------------------
 -- FIND CURRENT PLAYER STATS FROM CLIENT STATE
 --------------------------------------------------
@@ -233,6 +267,61 @@ function BR.validPosition(value)
         return value
     end
     return nil
+end
+
+function BR.moneyFromTables(tbl, owner)
+    local candidates = {
+        tbl,
+        owner
+    }
+
+    if type(owner) == "table" then
+        for _, key in ipairs({
+            "player",
+            "career",
+            "profile",
+            "data",
+            "state",
+            "current"
+        }) do
+            if type(owner[key]) == "table" then
+                table.insert(candidates, owner[key])
+            end
+        end
+    end
+
+    for _, candidate in ipairs(candidates) do
+        if type(candidate) == "table" then
+            for _, key in ipairs({
+                "money",
+                "Money",
+                "cash",
+                "Cash",
+                "bank",
+                "Bank"
+            }) do
+                local value = tonumber(candidate[key])
+
+                if value ~= nil and value >= 0 then
+                    return value, tostring(key)
+                end
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+function BR.currentMoney()
+    local money, source = BR.moneyFromTables(BR.Stats, BR.StatsOwner)
+
+    if money ~= nil then
+        BR.CurrentMoney = money
+        BR.MoneySource = "career." .. tostring(source or "money")
+        return money
+    end
+
+    return BR.CurrentMoney
 end
 
 function BR.scoreStatTable(tbl, parent)
@@ -281,11 +370,18 @@ function BR.scoreStatTable(tbl, parent)
         end
     end
 
+    local money, moneySource = BR.moneyFromTables(tbl, owner)
+    if money ~= nil then
+        score = score + 250
+    end
+
     return {
         Score = score,
         Stats = tbl,
         Owner = owner,
-        Position = pos
+        Position = pos,
+        Money = money,
+        MoneySource = moneySource
     }
 end
 
@@ -334,8 +430,14 @@ function BR.findStats()
         BR.Stats = best.Stats
         BR.StatsOwner = best.Owner
         BR.DetectedPosition = best.Position or BR.DetectedPosition
+
+        if best.Money ~= nil then
+            BR.CurrentMoney = best.Money
+            BR.MoneySource = "career." .. tostring(best.MoneySource or "money")
+        end
     end
 
+    BR.currentMoney()
     return BR.Stats
 end
 
@@ -538,31 +640,252 @@ function BR.rollChance(choice, button)
     return 50
 end
 
-function BR.choiceScore(choice, button)
-    local base = BR.effectScore(choice.effects)
+function BR.ratingProfile(choice, button)
+    local base = 0
+
+    if type(choice.effects) == "table" then
+        base = tonumber(choice.effects.ratingDelta) or 0
+    end
 
     if type(choice.roll) ~= "table" then
-        return base, nil, nil, nil
+        return {
+            Worst = base,
+            Best = base,
+            Expected = base,
+            SafeProbability = base >= 0 and 1 or 0
+        }
     end
 
     local chance = BR.rollChance(choice, button) or 50
-    local p = chance / 100
+    local p = math.clamp(chance / 100, 0, 1)
 
-    local success = BR.effectScore(choice.success)
-    local fail = BR.effectScore(choice.fail)
+    local successDelta =
+        base
+        + (type(choice.success) == "table"
+            and (tonumber(choice.success.ratingDelta) or 0)
+            or 0)
 
-    local rollScore = 0
+    local failDelta =
+        base
+        + (type(choice.fail) == "table"
+            and (tonumber(choice.fail.ratingDelta) or 0)
+            or 0)
 
-    if BR.RiskMode == "Max Upside" then
-        rollScore = success
-    elseif BR.RiskMode == "Safe" then
-        rollScore = math.min(success, fail) * 0.75
-            + (success * p + fail * (1 - p)) * 0.25
-    else
-        rollScore = success * p + fail * (1 - p)
+    local safeProbability = 0
+
+    if successDelta >= 0 and failDelta >= 0 then
+        safeProbability = 1
+    elseif successDelta >= 0 and failDelta < 0 then
+        safeProbability = p
+    elseif successDelta < 0 and failDelta >= 0 then
+        safeProbability = 1 - p
     end
 
-    return base + rollScore, chance, success, fail
+    return {
+        Worst = math.min(successDelta, failDelta),
+        Best = math.max(successDelta, failDelta),
+        Expected = successDelta * p + failDelta * (1 - p),
+        SafeProbability = safeProbability
+    }
+end
+
+function BR.buttonInteractable(button)
+    if not button or not BR.isActuallyVisible(button) then
+        return false, "not visible"
+    end
+
+    if button:IsA("GuiButton") then
+        if button.Active == false then
+            return false, "button inactive"
+        end
+
+        local okInteractable, interactable = pcall(function()
+            return button.Interactable
+        end)
+
+        if okInteractable and interactable == false then
+            return false, "button not interactable"
+        end
+    end
+
+    if button:GetAttribute("Disabled") == true
+        or button:GetAttribute("Locked") == true
+        or button:GetAttribute("Busy") == true then
+        return false, "button disabled"
+    end
+
+    return true, nil
+end
+
+function BR.choiceKey(choice, eventInfo)
+    return tostring(eventInfo and eventInfo.id or "?")
+        .. "::"
+        .. BR.norm(choice and choice.text or "?")
+end
+
+function BR.choiceAffordable(choice)
+    local cost = tonumber(choice and choice.cost) or 0
+
+    if cost <= 0 then
+        return true, cost, nil
+    end
+
+    local money = BR.currentMoney()
+
+    if money ~= nil then
+        if money >= cost then
+            return true, cost, nil
+        end
+
+        return false, cost,
+            "need " .. BR.short(cost)
+            .. " | have " .. BR.short(money)
+    end
+
+    if BR.SkipPaidWhenMoneyUnknown then
+        return false, cost, "money unknown"
+    end
+
+    return true, cost, "money unknown"
+end
+
+function BR.choiceScore(choice, button)
+    local base = BR.effectScore(choice.effects)
+    local chance = nil
+    local success = nil
+    local fail = nil
+
+    if type(choice.roll) == "table" then
+        chance = BR.rollChance(choice, button) or 50
+        local p = chance / 100
+
+        success = BR.effectScore(choice.success)
+        fail = BR.effectScore(choice.fail)
+
+        local rollScore = 0
+
+        if BR.RiskMode == "Max Upside" then
+            rollScore = success
+        elseif BR.RiskMode == "Safe" or BR.RiskMode == "Never Minus" then
+            rollScore = math.min(success, fail) * 0.70
+                + (success * p + fail * (1 - p)) * 0.30
+        else
+            rollScore = success * p + fail * (1 - p)
+        end
+
+        base = base + rollScore
+    end
+
+    local cost = tonumber(choice.cost) or 0
+    if cost > 0 then
+        local money = BR.currentMoney()
+        local ratio = 1
+
+        if money ~= nil and money > 0 then
+            ratio = math.clamp(cost / money, 0, 2)
+        end
+
+        -- Paid options are not free value. A direct rating gain can still
+        -- outweigh this, but the optimizer will not waste all cash for a
+        -- tiny secondary-stat improvement.
+        local penalty = BR.FocusMode == "Rating Focus"
+            and (25 + ratio * 60)
+            or (40 + ratio * 110)
+
+        base = base - penalty
+    end
+
+    return base, chance, success, fail
+end
+
+function BR.evaluateChoice(choice, button, eventInfo)
+    local interactable, disabledReason = BR.buttonInteractable(button)
+
+    if not interactable then
+        return nil, "disabled", disabledReason
+    end
+
+    local key = BR.choiceKey(choice, eventInfo)
+    local blockedUntil = tonumber(BR.BlockedChoiceUntil[key]) or 0
+
+    if blockedUntil > os.clock() then
+        return nil, "blocked", "recent click was rejected"
+    end
+
+    local affordable, cost, affordabilityReason = BR.choiceAffordable(choice)
+
+    if not affordable then
+        return nil, "unaffordable", affordabilityReason
+    end
+
+    local score, chance, success, fail = BR.choiceScore(choice, button)
+    local profile = BR.ratingProfile(choice, button)
+
+    return {
+        Button = button,
+        Choice = choice,
+        Event = eventInfo,
+        Text = choice.text,
+        Score = score,
+        Chance = chance,
+        SuccessScore = success,
+        FailScore = fail,
+        Cost = cost,
+        Money = BR.currentMoney(),
+        WorstRating = profile.Worst,
+        BestRating = profile.Best,
+        ExpectedRating = profile.Expected,
+        SafeProbability = profile.SafeProbability,
+        AffordabilityReason = affordabilityReason,
+        Key = key
+    }, nil, nil
+end
+
+function BR.betterCandidate(a, b)
+    if not b then
+        return true
+    end
+
+    if BR.RiskMode == "Never Minus" then
+        local aSafe = (a.WorstRating or 0) >= 0
+        local bSafe = (b.WorstRating or 0) >= 0
+
+        if aSafe ~= bSafe then
+            return aSafe
+        end
+
+        if aSafe then
+            if (a.WorstRating or 0) ~= (b.WorstRating or 0) then
+                return (a.WorstRating or 0) > (b.WorstRating or 0)
+            end
+
+            if (a.ExpectedRating or 0) ~= (b.ExpectedRating or 0) then
+                return (a.ExpectedRating or 0) > (b.ExpectedRating or 0)
+            end
+        else
+            if (a.SafeProbability or 0) ~= (b.SafeProbability or 0) then
+                return (a.SafeProbability or 0) > (b.SafeProbability or 0)
+            end
+
+            if (a.WorstRating or 0) ~= (b.WorstRating or 0) then
+                return (a.WorstRating or 0) > (b.WorstRating or 0)
+            end
+
+            if (a.ExpectedRating or 0) ~= (b.ExpectedRating or 0) then
+                return (a.ExpectedRating or 0) > (b.ExpectedRating or 0)
+            end
+        end
+    elseif BR.RiskMode == "Safe" then
+        if (a.WorstRating or 0) ~= (b.WorstRating or 0) then
+            return (a.WorstRating or 0) > (b.WorstRating or 0)
+        end
+
+        if (a.SafeProbability or 0) ~= (b.SafeProbability or 0) then
+            return (a.SafeProbability or 0) > (b.SafeProbability or 0)
+        end
+    end
+
+    return (a.Score or -math.huge) > (b.Score or -math.huge)
 end
 
 --------------------------------------------------
@@ -616,8 +939,43 @@ function BR.buttonTexts(button)
     return result
 end
 
+function BR.currentVisibleEvent()
+    local best = nil
+    local bestLength = 0
+
+    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+        if (object:IsA("TextLabel") or object:IsA("TextButton"))
+            and BR.isActuallyVisible(object)
+            and type(object.Text) == "string" then
+
+            local eventInfo = BR.resolveEventTitle(object.Text)
+
+            if eventInfo then
+                local length = #BR.norm(object.Text)
+
+                if length > bestLength then
+                    best = eventInfo
+                    bestLength = length
+                end
+            end
+        end
+    end
+
+    return best
+end
+
 function BR.bestVisibleChoice()
     local best = nil
+    local currentEvent = BR.currentVisibleEvent()
+
+    local info = {
+        Known = 0,
+        Affordable = 0,
+        Unaffordable = 0,
+        Disabled = 0,
+        Blocked = 0,
+        Event = currentEvent
+    }
 
     for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
         if object:IsA("GuiButton") and BR.isActuallyVisible(object) then
@@ -625,37 +983,48 @@ function BR.bestVisibleChoice()
             local matched = nil
             local matchedText = nil
 
-            for _, text in ipairs(texts) do
-                local entries = BR.resolveChoiceText(text)
+            for _, buttonText in ipairs(texts) do
+                local entries = BR.resolveChoiceText(buttonText)
+
                 if entries then
                     matched = entries
-                    matchedText = text
+                    matchedText = buttonText
                     break
                 end
             end
 
             if matched then
                 for _, entry in ipairs(matched) do
-                    local score, chance, success, fail =
-                        BR.choiceScore(entry.Choice, object)
+                    -- V1 could associate a reused choice text with the wrong
+                    -- event. V2 first detects the visible event title and then
+                    -- only evaluates choices belonging to that exact event.
+                    if not currentEvent or entry.Event == currentEvent then
+                        info.Known = info.Known + 1
 
-                    if not best or score > best.Score then
-                        best = {
-                            Button = object,
-                            Choice = entry.Choice,
-                            Event = entry.Event,
-                            Text = matchedText or entry.Choice.text,
-                            Score = score,
-                            Chance = chance,
-                            SuccessScore = success,
-                            FailScore = fail
-                        }
+                        local candidate, skipType =
+                            BR.evaluateChoice(entry.Choice, object, entry.Event)
+
+                        if candidate then
+                            candidate.Text = matchedText or entry.Choice.text
+                            info.Affordable = info.Affordable + 1
+
+                            if BR.betterCandidate(candidate, best) then
+                                best = candidate
+                            end
+                        elseif skipType == "unaffordable" then
+                            info.Unaffordable = info.Unaffordable + 1
+                        elseif skipType == "disabled" then
+                            info.Disabled = info.Disabled + 1
+                        elseif skipType == "blocked" then
+                            info.Blocked = info.Blocked + 1
+                        end
                     end
                 end
             end
         end
     end
 
+    BR.LastScanInfo = info
     return best
 end
 
@@ -773,6 +1142,78 @@ function BR.click(button)
     return ok
 end
 
+function BR.tryChoice(best)
+    if not best or not best.Button then
+        return false, "no choice"
+    end
+
+    if os.clock() < (BR.ClickLockUntil or 0) then
+        return false, "click cooldown"
+    end
+
+    local affordable, _, reason = BR.choiceAffordable(best.Choice)
+    if not affordable then
+        BR.BlockedChoiceUntil[best.Key] = os.clock() + 5
+        return false, reason or "unaffordable"
+    end
+
+    local interactable, disabledReason = BR.buttonInteractable(best.Button)
+    if not interactable then
+        return false, disabledReason or "disabled"
+    end
+
+    BR.LastClickButton = best.Button
+    BR.LastClickAt = os.clock()
+    BR.ClickLockUntil = os.clock() + 1.25
+
+    local button = best.Button
+    local key = best.Key
+    local eventId = best.Event and best.Event.id
+    local ok = BR.click(button)
+
+    if ok then
+        -- If the same enabled choice is still sitting there after the click,
+        -- the game most likely rejected it (typically insufficient money or
+        -- another requirement). Temporarily blacklist it so the next-best
+        -- valid choice can be selected instead of spamming the same button.
+        task.delay(1.35, function()
+            if not BR.Alive then
+                return
+            end
+
+            local stillVisible =
+                button
+                and button.Parent
+                and BR.isActuallyVisible(button)
+
+            local stillInteractable = false
+            if stillVisible then
+                stillInteractable = BR.buttonInteractable(button)
+            end
+
+            local sameEvent = true
+            if eventId then
+                local current = BR.currentVisibleEvent()
+                sameEvent = current and current.id == eventId
+            end
+
+            if stillVisible and stillInteractable and sameEvent then
+                BR.BlockedChoiceUntil[key] = os.clock() + 6
+
+                pcall(function()
+                    BR.Fluent:Notify({
+                        Title = "Choice rejected",
+                        Content = "Skipping this option temporarily and trying the next valid one.",
+                        Duration = 3
+                    })
+                end)
+            end
+        end)
+    end
+
+    return ok, ok and nil or "click failed"
+end
+
 --------------------------------------------------
 -- STATUS
 --------------------------------------------------
@@ -792,12 +1233,33 @@ function BR.statsText()
         end
     end
 
+    local money = BR.currentMoney()
+    local moneyText = money ~= nil
+        and (BR.short(money) .. " (" .. tostring(BR.MoneySource) .. ")")
+        or "unknown"
+
     return "Player stats: " .. table.concat(parts, " | ")
+        .. "\nMoney: " .. moneyText
 end
 
 function BR.bestText(best)
+    local info = BR.LastScanInfo or {}
+
     if not best then
-        return "Waiting for a visible career/event choice..."
+        local eventTitle = info.Event and info.Event.title or "-"
+
+        return "Event: " .. tostring(eventTitle)
+            .. "\nNo clickable known choice right now."
+            .. "\nKnown: " .. tostring(info.Known or 0)
+            .. " | affordable: " .. tostring(info.Affordable or 0)
+            .. " | too expensive: " .. tostring(info.Unaffordable or 0)
+            .. " | disabled: " .. tostring(info.Disabled or 0)
+            .. " | retry-blocked: " .. tostring(info.Blocked or 0)
+            .. "\nMoney: " .. tostring(
+                BR.currentMoney() ~= nil
+                    and BR.short(BR.currentMoney())
+                    or "unknown"
+            )
     end
 
     local eventTitle = "-"
@@ -808,13 +1270,33 @@ function BR.bestText(best)
     local text =
         "Event: " .. eventTitle
         .. "\nBest: " .. tostring(best.Choice.text or best.Text)
+        .. "\nCost: " .. (
+            (tonumber(best.Cost) or 0) > 0
+                and BR.short(best.Cost)
+                or "FREE"
+        )
+        .. " | Money: " .. (
+            best.Money ~= nil
+                and BR.short(best.Money)
+                or "unknown"
+        )
+        .. "\nWorst rating: " .. string.format("%+.2f", best.WorstRating or 0)
+        .. " | Expected: " .. string.format("%+.2f", best.ExpectedRating or 0)
+        .. " | Best: " .. string.format("%+.2f", best.BestRating or 0)
+        .. "\nNo-minus chance: "
+        .. tostring(math.floor((best.SafeProbability or 0) * 100 + 0.5))
+        .. "%"
         .. "\nOptimizer Score: " .. string.format("%.1f", best.Score or 0)
 
     if best.Chance then
         text = text
             .. "\nRoll Chance: " .. tostring(math.floor(best.Chance)) .. "%"
-            .. "\nSuccess Score: " .. string.format("%.1f", best.SuccessScore or 0)
-            .. " | Fail Score: " .. string.format("%.1f", best.FailScore or 0)
+    end
+
+    if BR.RiskMode == "Never Minus"
+        and (best.WorstRating or 0) < 0 then
+        text = text
+            .. "\nWARNING: this event has no safer evaluated option; rating loss is possible."
     end
 
     return text
@@ -900,13 +1382,13 @@ BR.Tabs.Main:AddButton({
         BR.LastBest = best
 
         if best then
-            local ok = BR.click(best.Button)
+            local ok, reason = BR.tryChoice(best)
 
             BR.Fluent:Notify({
                 Title = "Best Rating",
                 Content = ok
                     and ("Selected: " .. tostring(best.Choice.text))
-                    or "Could not click the button.",
+                    or ("Could not select: " .. tostring(reason or "unknown")),
                 Duration = 3
             })
         else
@@ -936,8 +1418,9 @@ end)
 
 BR.RiskDropdown = BR.Tabs.Setup:AddDropdown("RiskMode", {
     Title = "Roll Strategy",
-    Description = "Expected Value uses the game's real roll chance formula when player stats can be detected.",
+    Description = "Never Minus avoids choices whose worst direct rating outcome is negative whenever a non-negative option exists.",
     Values = {
+        "Never Minus",
         "Expected Value",
         "Safe",
         "Max Upside"
@@ -948,6 +1431,16 @@ BR.RiskDropdown = BR.Tabs.Setup:AddDropdown("RiskMode", {
 
 BR.RiskDropdown:OnChanged(function(value)
     BR.RiskMode = tostring(value)
+end)
+
+BR.SkipUnknownPaidToggle = BR.Tabs.Setup:AddToggle("SkipUnknownPaid", {
+    Title = "Skip Paid Choices If Money Is Unknown",
+    Description = "Prevents the optimizer from getting stuck on an expensive option when the current bank balance could not be detected.",
+    Default = true
+})
+
+BR.SkipUnknownPaidToggle:OnChanged(function(value)
+    BR.SkipPaidWhenMoneyUnknown = value == true
 end)
 
 BR.PositionDropdown = BR.Tabs.Setup:AddDropdown("PositionMode", {
@@ -969,10 +1462,12 @@ BR.PositionDropdown:OnChanged(function(value)
 end)
 
 BR.Tabs.Setup:AddButton({
-    Title = "Refresh Player Stats",
+    Title = "Refresh Player State",
     Callback = function()
         BR.Stats = nil
         BR.StatsOwner = nil
+        BR.CurrentMoney = nil
+        BR.MoneySource = "-"
         BR.DetectedPosition = nil
         BR.findStats()
 
@@ -998,6 +1493,8 @@ BR.Tabs.Debug:AddButton({
         print("Focus:", BR.FocusMode)
         print("Risk:", BR.RiskMode)
         print("Position:", BR.currentPosition())
+        print("Current event:", BR.currentVisibleEvent() and BR.currentVisibleEvent().title)
+        print("Money:", BR.currentMoney(), BR.MoneySource)
         print(BR.statsText())
 
         if best then
@@ -1005,6 +1502,11 @@ BR.Tabs.Debug:AddButton({
             print("Choice:", best.Choice and best.Choice.text)
             print("Score:", best.Score)
             print("Chance:", best.Chance)
+            print("Worst rating:", best.WorstRating)
+            print("Expected rating:", best.ExpectedRating)
+            print("Best rating:", best.BestRating)
+            print("Safe probability:", best.SafeProbability)
+            print("Cost:", best.Cost)
         else
             print("No event choice visible.")
         end
@@ -1044,10 +1546,18 @@ task.spawn(function()
                         end
                         return n
                     end)())
+                    .. "\nEvent: " .. tostring(
+                        BR.currentVisibleEvent()
+                            and BR.currentVisibleEvent().title
+                            or "-"
+                    )
                     .. "\nPosition: " .. tostring(BR.currentPosition() or "-")
                     .. "\n" .. BR.statsText()
                     .. "\nFocus: " .. tostring(BR.FocusMode)
                     .. " | Risk: " .. tostring(BR.RiskMode)
+                    .. "\nKnown choices: " .. tostring((BR.LastScanInfo or {}).Known or 0)
+                    .. " | affordable: " .. tostring((BR.LastScanInfo or {}).Affordable or 0)
+                    .. " | too expensive: " .. tostring((BR.LastScanInfo or {}).Unaffordable or 0)
             )
         end)
 
@@ -1067,13 +1577,15 @@ task.spawn(function()
             end
         end
 
-        if BR.AutoChoice and best and best.Button then
+        if BR.AutoChoice
+            and best
+            and best.Button
+            and os.clock() >= (BR.ClickLockUntil or 0) then
+
             if best.Button ~= BR.LastClickButton
                 or os.clock() - BR.LastClickAt > 2 then
-                BR.LastClickButton = best.Button
-                BR.LastClickAt = os.clock()
 
-                local ok = BR.click(best.Button)
+                local ok, reason = BR.tryChoice(best)
 
                 if ok then
                     pcall(function()
@@ -1082,10 +1594,15 @@ task.spawn(function()
                             Content = tostring(best.Choice.text)
                                 .. (best.Chance
                                     and (" | " .. tostring(math.floor(best.Chance)) .. "%")
-                                    or ""),
+                                    or "")
+                                .. " | worst "
+                                .. string.format("%+.2f", best.WorstRating or 0),
                             Duration = 2
                         })
                     end)
+                elseif reason
+                    and reason ~= "click cooldown" then
+                    warn("[BestRating] choice skipped:", reason)
                 end
             end
         end
@@ -1106,7 +1623,7 @@ BR.findStats()
 BR.Window:SelectTab(1)
 
 warn(
-    "[BestRating] V1 ready | choices:",
+    "[BestRating] V2 SAFE ready | choices:",
     tostring((function()
         local n = 0
         for _ in pairs(BR.ChoiceIndex) do
