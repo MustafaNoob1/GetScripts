@@ -1,306 +1,1117 @@
-print("=== RATING GAME FINDER START ===")
+warn("[BestRating] V1 loaded")
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+-- Best Rating Optimizer V1
+-- Game detected from the supplied dump: START YOUR SOCCER CAREER!
+-- Uses the game's own ReplicatedStorage.DayFoot.Config + Events data.
+-- It does NOT change ratingDelta, roll chances, or server data.
+-- It only evaluates the choices the normal client is showing and can click
+-- the best visible choice for you.
 
-local keywords = {
-    "rating",
-    "rate",
-    "score",
-    "grade",
-    "rank",
-    "quality",
-    "result",
-    "reward",
-    "stars",
-    "star",
-    "judge",
-    "judging",
-    "performance",
-    "perfect",
-    "combo",
-    "customer",
-    "order",
-    "recipe",
-    "submit",
-    "finish",
-    "complete"
-}
-
-local function lower(value)
-    return string.lower(tostring(value or ""))
-end
-
-local function containsKeyword(value)
-    local s = lower(value)
-
-    for _, keyword in ipairs(keywords) do
-        if string.find(s, keyword, 1, true) then
-            return true, keyword
-        end
-    end
-
-    return false, nil
-end
-
-local output = {}
-local function add(line)
-    line = tostring(line or "")
-    table.insert(output, line)
-    print(line)
-end
-
-add("=== RATING GAME FINDER ===")
-add("PlaceId: " .. tostring(game.PlaceId))
-add("GameId: " .. tostring(game.GameId))
-add("")
-
---------------------------------------------------
--- 1) REMOTES
---------------------------------------------------
-add("==================================================")
-add("REMOTE CANDIDATES")
-add("==================================================")
-
-local remoteCount = 0
-
-for _, object in ipairs(ReplicatedStorage:GetDescendants()) do
-    if object:IsA("RemoteEvent")
-        or object:IsA("RemoteFunction")
-        or object.ClassName == "UnreliableRemoteEvent" then
-
-        local ok, keyword = containsKeyword(object.Name)
-
-        if ok then
-            remoteCount = remoteCount + 1
-
-            add(
-                tostring(remoteCount)
-                .. ". "
-                .. object.ClassName
-                .. " | "
-                .. object:GetFullName()
-                .. " | keyword="
-                .. tostring(keyword)
-            )
-        end
-    end
-end
-
-add("")
-add("Remote candidates: " .. tostring(remoteCount))
-add("")
-
---------------------------------------------------
--- 2) LOADED MODULES BY NAME/PATH
---------------------------------------------------
-add("==================================================")
-add("MODULE CANDIDATES BY PATH")
-add("==================================================")
-
-local modules = {}
-local moduleCandidates = {}
-
-local okModules, moduleResult = pcall(function()
-    return getloadedmodules()
-end)
-
-if okModules and type(moduleResult) == "table" then
-    modules = moduleResult
-else
-    add("getloadedmodules failed: " .. tostring(moduleResult))
-end
-
-add("Loaded modules: " .. tostring(#modules))
-
-for _, module in ipairs(modules) do
-    local okPath, path = pcall(function()
-        return module:GetFullName()
-    end)
-
-    if okPath then
-        local found, keyword = containsKeyword(path)
-
-        if found then
-            table.insert(moduleCandidates, module)
-
-            add(
-                tostring(#moduleCandidates)
-                .. ". "
-                .. tostring(path)
-                .. " | keyword="
-                .. tostring(keyword)
-            )
-        end
-    end
-end
-
-add("")
-add("Path candidates: " .. tostring(#moduleCandidates))
-add("")
-
---------------------------------------------------
--- 3) DECOMPILE PATH CANDIDATES
---------------------------------------------------
-add("==================================================")
-add("DECOMPILED PATH CANDIDATES")
-add("==================================================")
-
-local decompiledPaths = {}
-
-for index, module in ipairs(moduleCandidates) do
-    local path = tostring(module)
-
+if getgenv().BestRatingOptimizer and getgenv().BestRatingOptimizer.Stop then
     pcall(function()
-        path = module:GetFullName()
+        getgenv().BestRatingOptimizer:Stop()
     end)
+end
 
-    if not decompiledPaths[path] then
-        decompiledPaths[path] = true
+BR = {}
+getgenv().BestRatingOptimizer = BR
 
-        add("")
-        add("--------------------------------------------------")
-        add("MODULE " .. tostring(index) .. ": " .. path)
-        add("--------------------------------------------------")
+BR.Alive = true
+BR.AutoChoice = false
+BR.AutoIdentity = false
+BR.FocusMode = "Rating Focus"
+BR.RiskMode = "Expected Value"
+BR.PositionMode = "Auto"
+BR.ScanDelay = 0.18
+BR.LastClickAt = 0
+BR.LastClickButton = nil
+BR.LastBest = nil
+BR.LastStatsScan = 0
+BR.Stats = nil
+BR.StatsOwner = nil
+BR.DetectedPosition = nil
+BR.ChoiceIndex = {}
+BR.TranslationIndex = {}
+BR.IdentityBest = nil
 
-        local okSource, source = pcall(function()
-            return decompile(module)
-        end)
+BR.Players = game:GetService("Players")
+BR.ReplicatedStorage = game:GetService("ReplicatedStorage")
+BR.VirtualInputManager = game:GetService("VirtualInputManager")
+BR.Player = BR.Players.LocalPlayer
+BR.PlayerGui = BR.Player:WaitForChild("PlayerGui")
+BR.DayFoot = BR.ReplicatedStorage:WaitForChild("DayFoot")
 
-        if okSource and type(source) == "string" then
-            add(source)
-        else
-            add("[DECOMPILE FAILED] " .. tostring(source))
-        end
+BR.Config = require(BR.DayFoot:WaitForChild("Config"))
+BR.Events = require(BR.DayFoot:WaitForChild("Events"))
 
-        task.wait()
+--------------------------------------------------
+-- TEXT HELPERS
+--------------------------------------------------
+
+function BR.norm(value)
+    local s = tostring(value or "")
+    s = string.lower(s)
+
+    -- Normalize smart punctuation that often differs between locale/UI text.
+    s = string.gsub(s, "’", "'")
+    s = string.gsub(s, "“", "\"")
+    s = string.gsub(s, "”", "\"")
+    s = string.gsub(s, "–", "-")
+    s = string.gsub(s, "—", "-")
+
+    -- Remove rich-text tags and collapse whitespace.
+    s = string.gsub(s, "<.->", " ")
+    s = string.gsub(s, "%s+", " ")
+    s = string.gsub(s, "^%s+", "")
+    s = string.gsub(s, "%s+$", "")
+
+    return s
+end
+
+function BR.short(value)
+    local n = tonumber(value)
+    if n == nil then
+        return tostring(value or "-")
     end
+
+    if math.abs(n) >= 1000000000 then
+        return string.format("%.2fB", n / 1000000000)
+    elseif math.abs(n) >= 1000000 then
+        return string.format("%.2fM", n / 1000000)
+    elseif math.abs(n) >= 1000 then
+        return string.format("%.1fK", n / 1000)
+    end
+
+    if math.abs(n - math.floor(n)) < 0.001 then
+        return tostring(math.floor(n))
+    end
+
+    return string.format("%.2f", n)
 end
 
 --------------------------------------------------
--- 4) BROAD MODULE SOURCE SCAN
--- Decompile loaded modules, but only save modules whose
--- source contains one of our rating/score keywords.
+-- INDEX ALL EVENT CHOICES
 --------------------------------------------------
-add("")
-add("==================================================")
-add("BROAD SOURCE MATCHES")
-add("==================================================")
 
-local broadMatches = 0
+function BR.registerChoice(choice, eventInfo)
+    if type(choice) ~= "table" or type(choice.text) ~= "string" then
+        return
+    end
 
-for index, module in ipairs(modules) do
-    local path = tostring(module)
+    local key = BR.norm(choice.text)
+    if key == "" then
+        return
+    end
 
-    pcall(function()
-        path = module:GetFullName()
-    end)
+    BR.ChoiceIndex[key] = BR.ChoiceIndex[key] or {}
 
-    if not decompiledPaths[path] then
-        local okSource, source = pcall(function()
-            return decompile(module)
-        end)
+    table.insert(BR.ChoiceIndex[key], {
+        Choice = choice,
+        Event = eventInfo
+    })
+end
 
-        if okSource and type(source) == "string" then
-            local found, keyword = containsKeyword(source)
+function BR.walkEvents(node, parentEvent, seen)
+    if type(node) ~= "table" then
+        return
+    end
 
-            if found then
-                broadMatches = broadMatches + 1
+    seen = seen or {}
+    if seen[node] then
+        return
+    end
+    seen[node] = true
 
-                add("")
-                add("--------------------------------------------------")
-                add(
-                    "SOURCE MATCH "
-                    .. tostring(broadMatches)
-                    .. ": "
-                    .. path
-                    .. " | keyword="
-                    .. tostring(keyword)
-                )
-                add("--------------------------------------------------")
-                add(source)
+    local nextEvent = parentEvent
+
+    if type(node.id) == "string"
+        and type(node.title) == "string"
+        and type(node.choices) == "table" then
+        nextEvent = node
+
+        for _, choice in ipairs(node.choices) do
+            BR.registerChoice(choice, node)
+        end
+    end
+
+    for key, value in pairs(node) do
+        if type(value) == "table" and key ~= "choices" then
+            BR.walkEvents(value, nextEvent, seen)
+        end
+    end
+end
+
+BR.walkEvents(BR.Events, nil, {})
+
+--------------------------------------------------
+-- TRANSLATION ALIASES
+--------------------------------------------------
+
+function BR.indexTranslations()
+    local names = {
+        "StringsDE",
+        "StringsPT",
+        "StringsES",
+        "StringsFR",
+        "StringsEvents"
+    }
+
+    local function walk(tbl, seen)
+        if type(tbl) ~= "table" then
+            return
+        end
+
+        seen = seen or {}
+        if seen[tbl] then
+            return
+        end
+        seen[tbl] = true
+
+        for key, value in pairs(tbl) do
+            if type(key) == "string" and type(value) == "string" then
+                local translated = BR.norm(value)
+                local english = BR.norm(key)
+
+                if translated ~= "" and english ~= "" then
+                    BR.TranslationIndex[translated] = english
+                end
+            elseif type(value) == "table" then
+                walk(value, seen)
             end
         end
+    end
 
-        if index % 15 == 0 then
-            task.wait()
+    for _, name in ipairs(names) do
+        local module = BR.DayFoot:FindFirstChild(name)
+
+        if module and module:IsA("ModuleScript") then
+            local ok, result = pcall(require, module)
+            if ok and type(result) == "table" then
+                walk(result, {})
+            end
         end
     end
 end
 
-add("")
-add("Broad source matches: " .. tostring(broadMatches))
-add("")
+pcall(BR.indexTranslations)
+
+function BR.resolveChoiceText(text)
+    local key = BR.norm(text)
+    local direct = BR.ChoiceIndex[key]
+
+    if direct then
+        return direct
+    end
+
+    local english = BR.TranslationIndex[key]
+    if english then
+        return BR.ChoiceIndex[english]
+    end
+
+    return nil
+end
 
 --------------------------------------------------
--- 5) GC TABLE HINTS
+-- FIND CURRENT PLAYER STATS FROM CLIENT STATE
 --------------------------------------------------
-add("==================================================")
-add("GC TABLE HINTS")
-add("==================================================")
 
-local gcMatches = 0
+BR.StatKeys = BR.Config.STATS or {
+    "tir",
+    "passe",
+    "dribble",
+    "vitesse",
+    "puissance",
+    "defense",
+    "mental",
+    "charisme",
+    "discipline"
+}
 
-local okGc, gcObjects = pcall(function()
-    return getgc(true)
-end)
+function BR.validPosition(value)
+    value = string.upper(tostring(value or ""))
+    if value == "GK" or value == "DEF" or value == "MID" or value == "ATT" then
+        return value
+    end
+    return nil
+end
 
-if okGc and type(gcObjects) == "table" then
-    for _, object in ipairs(gcObjects) do
+function BR.scoreStatTable(tbl, parent)
+    if type(tbl) ~= "table" then
+        return nil
+    end
+
+    local count = 0
+    local sum = 0
+
+    for _, key in ipairs(BR.StatKeys) do
+        local value = tonumber(tbl[key])
+        if value and value >= 0 and value <= 250 then
+            count = count + 1
+            sum = sum + value
+        end
+    end
+
+    if count < 5 then
+        return nil
+    end
+
+    local average = sum / math.max(1, count)
+
+    -- Reject Config weight/mod tables such as 0.1 / 0.2 / 0.3.
+    if average < 5 then
+        return nil
+    end
+
+    local score = count * 100 + average
+    local owner = parent or tbl
+
+    local pos =
+        BR.validPosition(tbl.pos)
+        or BR.validPosition(tbl.position)
+        or BR.validPosition(owner.pos)
+        or BR.validPosition(owner.position)
+
+    if pos then
+        score = score + 500
+    end
+
+    for _, key in ipairs({"ovr", "overall", "gen", "pot", "potential", "age"}) do
+        if tonumber(tbl[key]) or tonumber(owner[key]) then
+            score = score + 35
+        end
+    end
+
+    return {
+        Score = score,
+        Stats = tbl,
+        Owner = owner,
+        Position = pos
+    }
+end
+
+function BR.findStats()
+    if type(getgc) ~= "function" then
+        return BR.Stats
+    end
+
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then
+        return BR.Stats
+    end
+
+    local best = nil
+
+    local function consider(tbl, parent)
+        local candidate = BR.scoreStatTable(tbl, parent)
+        if candidate and (not best or candidate.Score > best.Score) then
+            best = candidate
+        end
+    end
+
+    for _, object in ipairs(objects) do
         if type(object) == "table" then
-            local matchedKeys = {}
+            consider(object, object)
 
-            local okTable = pcall(function()
-                for key, value in pairs(object) do
-                    local keyMatch = containsKeyword(key)
-                    local valueMatch = false
+            -- Current career/player state is frequently nested one level deep.
+            for key, value in pairs(object) do
+                if type(value) == "table" then
+                    local k = BR.norm(key)
 
-                    if type(value) == "string" then
-                        valueMatch = containsKeyword(value)
-                    end
-
-                    if keyMatch or valueMatch then
-                        table.insert(
-                            matchedKeys,
-                            tostring(key) .. "=" .. tostring(value)
-                        )
-
-                        if #matchedKeys >= 15 then
-                            break
-                        end
+                    if k == "stats"
+                        or k == "player"
+                        or k == "career"
+                        or k == "profile"
+                        or k == "data"
+                        or k == "state" then
+                        consider(value, object)
                     end
                 end
-            end)
+            end
+        end
+    end
 
-            if okTable and #matchedKeys > 0 then
-                gcMatches = gcMatches + 1
-                add("")
-                add("GC TABLE " .. tostring(gcMatches))
-                add(table.concat(matchedKeys, " | "))
+    if best then
+        BR.Stats = best.Stats
+        BR.StatsOwner = best.Owner
+        BR.DetectedPosition = best.Position or BR.DetectedPosition
+    end
 
-                if gcMatches >= 100 then
-                    add("GC table output capped at 100 matches.")
+    return BR.Stats
+end
+
+function BR.currentPosition()
+    if BR.PositionMode ~= "Auto" then
+        return BR.validPosition(BR.PositionMode)
+    end
+
+    if BR.DetectedPosition then
+        return BR.DetectedPosition
+    end
+
+    -- Last fallback: look for a visible standalone position label.
+    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+        if object:IsA("TextLabel") and object.Visible then
+            local pos = BR.validPosition(object.Text)
+            if pos then
+                return pos
+            end
+        end
+    end
+
+    return nil
+end
+
+--------------------------------------------------
+-- EFFECT SCORING
+--------------------------------------------------
+
+BR.PositionWeights = {
+    GK = {
+        mental = 0.30,
+        defense = 0.25,
+        puissance = 0.20,
+        passe = 0.15,
+        vitesse = 0.10
+    },
+    DEF = {
+        defense = 0.35,
+        puissance = 0.20,
+        vitesse = 0.15,
+        mental = 0.15,
+        passe = 0.10,
+        dribble = 0.05
+    },
+    MID = {
+        passe = 0.30,
+        mental = 0.20,
+        dribble = 0.15,
+        tir = 0.10,
+        vitesse = 0.10,
+        puissance = 0.10,
+        defense = 0.05
+    },
+    ATT = {
+        tir = 0.30,
+        dribble = 0.20,
+        vitesse = 0.20,
+        passe = 0.10,
+        puissance = 0.10,
+        mental = 0.10
+    }
+}
+
+function BR.statImpact(key, amount)
+    amount = tonumber(amount) or 0
+    local position = BR.currentPosition()
+    local weights = BR.PositionWeights[position] or {}
+    local weight = weights[key] or 0
+
+    if key == "technique" then
+        local total = (weights.tir or 0) + (weights.passe or 0) + (weights.dribble or 0)
+        weight = total / 3
+    elseif key == "physique" then
+        local total = (weights.vitesse or 0) + (weights.puissance or 0) + (weights.defense or 0)
+        weight = total / 3
+    end
+
+    if BR.FocusMode == "Career Max" then
+        return amount * (10 + weight * 90)
+    end
+
+    return amount * (3 + weight * 35)
+end
+
+function BR.effectScore(effects)
+    if type(effects) ~= "table" then
+        return 0
+    end
+
+    local score = 0
+
+    -- Direct match-rating change dominates Rating Focus.
+    local ratingWeight = BR.FocusMode == "Rating Focus" and 1000 or 420
+    score = score + (tonumber(effects.ratingDelta) or 0) * ratingWeight
+
+    -- Match actions that usually feed the rating/result indirectly.
+    if effects.goal == true then score = score + 180 end
+    if effects.assist == true then score = score + 130 end
+    if effects.save == true then score = score + 150 end
+    if effects.cleanSheet == true or effects.cs == true then score = score + 120 end
+    if effects.concede == true then score = score - 180 end
+    if effects.red == true or effects.redCard == true then score = score - 220 end
+    if effects.injury then score = score - math.abs(tonumber(effects.injury) or 1) * 45 end
+
+    for _, stat in ipairs(BR.StatKeys) do
+        if effects[stat] ~= nil then
+            score = score + BR.statImpact(stat, effects[stat])
+        end
+    end
+
+    if effects.technique ~= nil then
+        score = score + BR.statImpact("technique", effects.technique)
+    end
+
+    if effects.physique ~= nil then
+        score = score + BR.statImpact("physique", effects.physique)
+    end
+
+    local careerMultiplier = BR.FocusMode == "Career Max" and 1.8 or 1
+
+    score = score + (tonumber(effects.xp) or 0) * 1.4 * careerMultiplier
+    score = score + (tonumber(effects.forme) or 0) * 8 * careerMultiplier
+    score = score + (tonumber(effects.moral) or 0) * 4 * careerMultiplier
+    score = score + (tonumber(effects.discipline) or 0) * 7 * careerMultiplier
+    score = score + (tonumber(effects.relCoach) or 0) * 5 * careerMultiplier
+    score = score + (tonumber(effects.vestiaire) or 0) * 3 * careerMultiplier
+    score = score + (tonumber(effects.rep) or 0) * 3 * careerMultiplier
+
+    -- Money matters, but should not override a major rating/stat gain.
+    local money = tonumber(effects.money) or 0
+    if money ~= 0 then
+        score = score + math.clamp(money / 5000, -20, 20)
+    end
+
+    return score
+end
+
+--------------------------------------------------
+-- ROLL CHANCE + CHOICE SCORE
+--------------------------------------------------
+
+function BR.parseChanceFromButton(button)
+    if not button then
+        return nil
+    end
+
+    local texts = {}
+
+    if button:IsA("TextButton") then
+        table.insert(texts, button.Text)
+    end
+
+    for _, object in ipairs(button:GetDescendants()) do
+        if (object:IsA("TextLabel") or object:IsA("TextButton"))
+            and object.Visible
+            and type(object.Text) == "string" then
+            table.insert(texts, object.Text)
+        end
+    end
+
+    for _, text in ipairs(texts) do
+        local value = string.match(text, "(%d+)%s*%%")
+        if value then
+            local n = tonumber(value)
+            if n and n >= 0 and n <= 100 then
+                return n
+            end
+        end
+    end
+
+    return nil
+end
+
+function BR.rollChance(choice, button)
+    if type(choice) ~= "table" or type(choice.roll) ~= "table" then
+        return nil
+    end
+
+    local displayed = BR.parseChanceFromButton(button)
+    if displayed then
+        return displayed
+    end
+
+    local stats = BR.Stats or BR.findStats()
+
+    if stats and type(BR.Config.rollChance) == "function" then
+        local ok, chance = pcall(
+            BR.Config.rollChance,
+            stats,
+            choice.roll.stat,
+            choice.roll.dc
+        )
+
+        if ok and tonumber(chance) then
+            return math.clamp(tonumber(chance), 0, 100)
+        end
+    end
+
+    return 50
+end
+
+function BR.choiceScore(choice, button)
+    local base = BR.effectScore(choice.effects)
+
+    if type(choice.roll) ~= "table" then
+        return base, nil, nil, nil
+    end
+
+    local chance = BR.rollChance(choice, button) or 50
+    local p = chance / 100
+
+    local success = BR.effectScore(choice.success)
+    local fail = BR.effectScore(choice.fail)
+
+    local rollScore = 0
+
+    if BR.RiskMode == "Max Upside" then
+        rollScore = success
+    elseif BR.RiskMode == "Safe" then
+        rollScore = math.min(success, fail) * 0.75
+            + (success * p + fail * (1 - p)) * 0.25
+    else
+        rollScore = success * p + fail * (1 - p)
+    end
+
+    return base + rollScore, chance, success, fail
+end
+
+--------------------------------------------------
+-- GUI SCANNING
+--------------------------------------------------
+
+function BR.isActuallyVisible(object)
+    if not object or not object.Parent then
+        return false
+    end
+
+    local current = object
+
+    while current and current ~= game do
+        if current:IsA("GuiObject") and not current.Visible then
+            return false
+        end
+
+        if current:IsA("ScreenGui") and not current.Enabled then
+            return false
+        end
+
+        current = current.Parent
+    end
+
+    if object:IsA("GuiObject") then
+        if object.AbsoluteSize.X < 5 or object.AbsoluteSize.Y < 5 then
+            return false
+        end
+    end
+
+    return true
+end
+
+function BR.buttonTexts(button)
+    local result = {}
+
+    if button:IsA("TextButton") and BR.norm(button.Text) ~= "" then
+        table.insert(result, button.Text)
+    end
+
+    for _, object in ipairs(button:GetDescendants()) do
+        if (object:IsA("TextLabel") or object:IsA("TextButton"))
+            and object.Visible
+            and type(object.Text) == "string"
+            and BR.norm(object.Text) ~= "" then
+            table.insert(result, object.Text)
+        end
+    end
+
+    return result
+end
+
+function BR.bestVisibleChoice()
+    local best = nil
+
+    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+        if object:IsA("GuiButton") and BR.isActuallyVisible(object) then
+            local texts = BR.buttonTexts(object)
+            local matched = nil
+            local matchedText = nil
+
+            for _, text in ipairs(texts) do
+                local entries = BR.resolveChoiceText(text)
+                if entries then
+                    matched = entries
+                    matchedText = text
                     break
                 end
             end
+
+            if matched then
+                for _, entry in ipairs(matched) do
+                    local score, chance, success, fail =
+                        BR.choiceScore(entry.Choice, object)
+
+                    if not best or score > best.Score then
+                        best = {
+                            Button = object,
+                            Choice = entry.Choice,
+                            Event = entry.Event,
+                            Text = matchedText or entry.Choice.text,
+                            Score = score,
+                            Chance = chance,
+                            SuccessScore = success,
+                            FailScore = fail
+                        }
+                    end
+                end
+            end
         end
     end
-else
-    add("getgc failed: " .. tostring(gcObjects))
+
+    return best
 end
 
-add("")
-add("GC matches: " .. tostring(gcMatches))
-add("")
+--------------------------------------------------
+-- BEST RATING IDENTITY
+--------------------------------------------------
+
+function BR.bestIdentity()
+    local position = BR.currentPosition()
+    if not position then
+        return nil
+    end
+
+    local identities = BR.Config.IDENTITIES
+    if type(identities) ~= "table" then
+        return nil
+    end
+
+    local list = identities[position]
+    if type(list) ~= "table" then
+        return nil
+    end
+
+    local best = nil
+
+    for _, identity in ipairs(list) do
+        local perks = identity.perks or {}
+        local rating = tonumber(perks.rating) or 0
+
+        -- Rating is primary. Tiebreak with useful output perks.
+        local tie =
+            (tonumber(perks.goals) or 0)
+            + (tonumber(perks.assists) or 0)
+            + (tonumber(perks.cs) or 0)
+
+        local value = rating * 1000 + tie
+
+        if not best or value > best.Value then
+            best = {
+                Identity = identity,
+                Rating = rating,
+                Value = value,
+                Position = position
+            }
+        end
+    end
+
+    return best
+end
+
+function BR.findVisibleButtonByText(targetText)
+    local target = BR.norm(targetText)
+
+    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+        if object:IsA("GuiButton") and BR.isActuallyVisible(object) then
+            for _, text in ipairs(BR.buttonTexts(object)) do
+                if BR.norm(text) == target then
+                    return object
+                end
+            end
+        end
+    end
+
+    return nil
+end
 
 --------------------------------------------------
--- SAVE
+-- CLICK
 --------------------------------------------------
-local finalOutput = table.concat(output, "\n")
 
-local saveOk, saveErr = pcall(function()
-    writefile("Rating_Game_Modules.txt", finalOutput)
+function BR.click(button)
+    if not button or not BR.isActuallyVisible(button) then
+        return false
+    end
+
+    -- Executor-native signal click when available.
+    if type(firesignal) == "function" then
+        local ok = pcall(function()
+            firesignal(button.Activated)
+        end)
+
+        if ok then
+            return true
+        end
+    end
+
+    -- Roblox input fallback.
+    local position = button.AbsolutePosition
+    local size = button.AbsoluteSize
+    local x = position.X + size.X / 2
+    local y = position.Y + size.Y / 2
+
+    local ok = pcall(function()
+        BR.VirtualInputManager:SendMouseButtonEvent(
+            x,
+            y,
+            0,
+            true,
+            game,
+            0
+        )
+
+        task.wait(0.04)
+
+        BR.VirtualInputManager:SendMouseButtonEvent(
+            x,
+            y,
+            0,
+            false,
+            game,
+            0
+        )
+    end)
+
+    return ok
+end
+
+--------------------------------------------------
+-- STATUS
+--------------------------------------------------
+
+function BR.statsText()
+    local stats = BR.Stats
+
+    if not stats then
+        return "Player stats: not detected yet"
+    end
+
+    local parts = {}
+
+    for _, key in ipairs(BR.StatKeys) do
+        if tonumber(stats[key]) then
+            table.insert(parts, key .. "=" .. BR.short(stats[key]))
+        end
+    end
+
+    return "Player stats: " .. table.concat(parts, " | ")
+end
+
+function BR.bestText(best)
+    if not best then
+        return "Waiting for a visible career/event choice..."
+    end
+
+    local eventTitle = "-"
+    if best.Event and best.Event.title then
+        eventTitle = tostring(best.Event.title)
+    end
+
+    local text =
+        "Event: " .. eventTitle
+        .. "\nBest: " .. tostring(best.Choice.text or best.Text)
+        .. "\nOptimizer Score: " .. string.format("%.1f", best.Score or 0)
+
+    if best.Chance then
+        text = text
+            .. "\nRoll Chance: " .. tostring(math.floor(best.Chance)) .. "%"
+            .. "\nSuccess Score: " .. string.format("%.1f", best.SuccessScore or 0)
+            .. " | Fail Score: " .. string.format("%.1f", best.FailScore or 0)
+    end
+
+    return text
+end
+
+function BR.identityText()
+    local best = BR.bestIdentity()
+
+    if not best then
+        return "Position: not detected. Set Position manually if needed."
+    end
+
+    local identity = best.Identity
+    local perks = identity.perks or {}
+
+    return "Position: " .. tostring(best.Position)
+        .. "\nBest direct-rating identity: " .. tostring(identity.name)
+        .. "\nRating perk: +" .. string.format("%.2f", best.Rating or 0)
+        .. "\nGoals perk: " .. tostring(perks.goals or 0)
+        .. " | Assists: " .. tostring(perks.assists or 0)
+        .. " | Clean sheets: " .. tostring(perks.cs or 0)
+end
+
+--------------------------------------------------
+-- FLUENT UI
+--------------------------------------------------
+
+BR.Fluent = loadstring(game:HttpGet(
+    "https://github.com/dawid-scripts/Fluent/releases/latest/download/main.lua"
+))()
+
+BR.Window = BR.Fluent:CreateWindow({
+    Title = "Best Rating Optimizer",
+    SubTitle = "START YOUR SOCCER CAREER!",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(650, 540),
+    Acrylic = true,
+    Theme = "Dark",
+    MinimizeKey = Enum.KeyCode.LeftControl
+})
+
+BR.Tabs = {
+    Main = BR.Window:AddTab({Title = "Optimizer", Icon = "star"}),
+    Setup = BR.Window:AddTab({Title = "Setup", Icon = "settings"}),
+    Debug = BR.Window:AddTab({Title = "Debug", Icon = "search"})
+}
+
+BR.StatusParagraph = BR.Tabs.Main:AddParagraph({
+    Title = "Best Visible Choice",
+    Content = "Scanning..."
+})
+
+BR.IdentityParagraph = BR.Tabs.Main:AddParagraph({
+    Title = "Rating Identity Advisor",
+    Content = "Scanning..."
+})
+
+BR.AutoToggle = BR.Tabs.Main:AddToggle("AutoBestChoice", {
+    Title = "Auto Best Choice",
+    Description = "Clicks the highest-scoring visible event choice automatically.",
+    Default = false
+})
+
+BR.AutoToggle:OnChanged(function(value)
+    BR.AutoChoice = value == true
 end)
 
-print("SAVE:", saveOk, saveErr or "")
-print("Output chars:", #finalOutput)
-print("=== RATING GAME FINDER END ===")
+BR.AutoIdentityToggle = BR.Tabs.Main:AddToggle("AutoBestIdentity", {
+    Title = "Auto Best Rating Identity",
+    Description = "If the identity-selection screen is open, chooses the identity with the largest direct rating perk.",
+    Default = false
+})
+
+BR.AutoIdentityToggle:OnChanged(function(value)
+    BR.AutoIdentity = value == true
+end)
+
+BR.Tabs.Main:AddButton({
+    Title = "Choose Best Visible Option Now",
+    Callback = function()
+        BR.findStats()
+        local best = BR.bestVisibleChoice()
+        BR.LastBest = best
+
+        if best then
+            local ok = BR.click(best.Button)
+
+            BR.Fluent:Notify({
+                Title = "Best Rating",
+                Content = ok
+                    and ("Selected: " .. tostring(best.Choice.text))
+                    or "Could not click the button.",
+                Duration = 3
+            })
+        else
+            BR.Fluent:Notify({
+                Title = "Best Rating",
+                Content = "No known event choice is visible.",
+                Duration = 3
+            })
+        end
+    end
+})
+
+BR.FocusDropdown = BR.Tabs.Setup:AddDropdown("FocusMode", {
+    Title = "Optimizer Focus",
+    Description = "Rating Focus strongly prioritizes direct match ratingDelta. Career Max gives more weight to long-term stats.",
+    Values = {
+        "Rating Focus",
+        "Career Max"
+    },
+    Multi = false,
+    Default = 1
+})
+
+BR.FocusDropdown:OnChanged(function(value)
+    BR.FocusMode = tostring(value)
+end)
+
+BR.RiskDropdown = BR.Tabs.Setup:AddDropdown("RiskMode", {
+    Title = "Roll Strategy",
+    Description = "Expected Value uses the game's real roll chance formula when player stats can be detected.",
+    Values = {
+        "Expected Value",
+        "Safe",
+        "Max Upside"
+    },
+    Multi = false,
+    Default = 1
+})
+
+BR.RiskDropdown:OnChanged(function(value)
+    BR.RiskMode = tostring(value)
+end)
+
+BR.PositionDropdown = BR.Tabs.Setup:AddDropdown("PositionMode", {
+    Title = "Position",
+    Description = "Auto tries to find your career position from client state. Choose manually if detection is wrong.",
+    Values = {
+        "Auto",
+        "ATT",
+        "MID",
+        "DEF",
+        "GK"
+    },
+    Multi = false,
+    Default = 1
+})
+
+BR.PositionDropdown:OnChanged(function(value)
+    BR.PositionMode = tostring(value)
+end)
+
+BR.Tabs.Setup:AddButton({
+    Title = "Refresh Player Stats",
+    Callback = function()
+        BR.Stats = nil
+        BR.StatsOwner = nil
+        BR.DetectedPosition = nil
+        BR.findStats()
+
+        BR.Fluent:Notify({
+            Title = "Stats",
+            Content = BR.statsText(),
+            Duration = 5
+        })
+    end
+})
+
+BR.DebugParagraph = BR.Tabs.Debug:AddParagraph({
+    Title = "Detection",
+    Content = "Loading..."
+})
+
+BR.Tabs.Debug:AddButton({
+    Title = "Print Current Best to Console",
+    Callback = function()
+        local best = BR.bestVisibleChoice()
+
+        print("=== BEST RATING DEBUG ===")
+        print("Focus:", BR.FocusMode)
+        print("Risk:", BR.RiskMode)
+        print("Position:", BR.currentPosition())
+        print(BR.statsText())
+
+        if best then
+            print("Event:", best.Event and best.Event.title)
+            print("Choice:", best.Choice and best.Choice.text)
+            print("Score:", best.Score)
+            print("Chance:", best.Chance)
+        else
+            print("No event choice visible.")
+        end
+    end
+})
+
+--------------------------------------------------
+-- MAIN LOOP
+--------------------------------------------------
+
+task.spawn(function()
+    while BR.Alive do
+        task.wait(BR.ScanDelay)
+
+        if os.clock() - BR.LastStatsScan > 4 then
+            BR.LastStatsScan = os.clock()
+            pcall(BR.findStats)
+        end
+
+        local best = nil
+        pcall(function()
+            best = BR.bestVisibleChoice()
+        end)
+
+        BR.LastBest = best
+
+        pcall(function()
+            BR.StatusParagraph:SetDesc(BR.bestText(best))
+            BR.IdentityParagraph:SetDesc(BR.identityText())
+
+            BR.DebugParagraph:SetDesc(
+                "Indexed choice texts: "
+                    .. tostring((function()
+                        local n = 0
+                        for _ in pairs(BR.ChoiceIndex) do
+                            n = n + 1
+                        end
+                        return n
+                    end)())
+                    .. "\nPosition: " .. tostring(BR.currentPosition() or "-")
+                    .. "\n" .. BR.statsText()
+                    .. "\nFocus: " .. tostring(BR.FocusMode)
+                    .. " | Risk: " .. tostring(BR.RiskMode)
+            )
+        end)
+
+        if BR.AutoIdentity then
+            local identity = BR.bestIdentity()
+
+            if identity and identity.Identity and identity.Identity.name then
+                local button = BR.findVisibleButtonByText(identity.Identity.name)
+
+                if button
+                    and (button ~= BR.LastClickButton
+                        or os.clock() - BR.LastClickAt > 2) then
+                    BR.LastClickButton = button
+                    BR.LastClickAt = os.clock()
+                    BR.click(button)
+                end
+            end
+        end
+
+        if BR.AutoChoice and best and best.Button then
+            if best.Button ~= BR.LastClickButton
+                or os.clock() - BR.LastClickAt > 2 then
+                BR.LastClickButton = best.Button
+                BR.LastClickAt = os.clock()
+
+                local ok = BR.click(best.Button)
+
+                if ok then
+                    pcall(function()
+                        BR.Fluent:Notify({
+                            Title = "Auto Best Choice",
+                            Content = tostring(best.Choice.text)
+                                .. (best.Chance
+                                    and (" | " .. tostring(math.floor(best.Chance)) .. "%")
+                                    or ""),
+                            Duration = 2
+                        })
+                    end)
+                end
+            end
+        end
+    end
+end)
+
+function BR:Stop()
+    self.Alive = false
+    self.AutoChoice = false
+    self.AutoIdentity = false
+
+    pcall(function()
+        self.Window:Destroy()
+    end)
+end
+
+BR.findStats()
+BR.Window:SelectTab(1)
+
+warn(
+    "[BestRating] V1 ready | choices:",
+    tostring((function()
+        local n = 0
+        for _ in pairs(BR.ChoiceIndex) do
+            n = n + 1
+        end
+        return n
+    end)())
+)
