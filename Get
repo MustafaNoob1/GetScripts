@@ -1,6 +1,6 @@
-warn("[BestRating] V5 GOAT AUTOPILOT loaded")
+warn("[BestRating] V6 GOAT MAX loaded")
 
--- Best Rating Optimizer V5 GOAT AUTOPILOT
+-- Best Rating Optimizer V6 GOAT MAX
 -- Game detected from the supplied dump: START YOUR SOCCER CAREER!
 -- Uses the game's own ReplicatedStorage.DayFoot.Config + Events data.
 -- It does NOT change ratingDelta, roll chances, or server data.
@@ -22,6 +22,8 @@ BR.AutoIdentity = false
 BR.AutoCareerPolicy = false
 BR.AutoCareerFlow = false
 BR.AutoTransferPolicy = false
+BR.AutoNewCareerBuild = false
+BR.AutoStaffPolicy = false
 BR.FullAutopilot = false
 BR.FocusMode = "GOAT Career"
 BR.RiskMode = "GOAT Dynamic"
@@ -34,6 +36,7 @@ BR.ClickLockUntil = 0
 BR.PolicyLockUntil = 0
 BR.LastPolicyAction = "-"
 BR.LastPolicyAt = 0
+BR.LastStaffScanAt = 0
 BR.LastBest = nil
 BR.LastStatsScan = 0
 BR.Stats = nil
@@ -43,13 +46,22 @@ BR.MoneySource = "-"
 BR.ActualPotential = nil
 BR.PotentialSource = "-"
 BR.CurrentOverall = nil
+BR.CurrentPeak = nil
 BR.CurrentReputation = nil
 BR.CurrentAge = nil
 BR.CurrentLuck = nil
 BR.ScoutEstimateLow = nil
 BR.ScoutEstimateHigh = nil
-BR.TargetPeakOverall = 100
-BR.TargetCareerPoints = 3400
+BR.TargetPeakOverall = 98
+BR.TargetCareerPoints = 4500
+BR.TargetBallons = 5
+BR.TargetGoalsATT = 600
+BR.TargetAssistsMID = 220
+BR.GOATBuildPosition = "ATT"
+BR.GOATBuildOrigin = "The Academy"
+BR.GOATBuildTeen = "Football, Nothing Else"
+BR.GOATBuildEntourage = "A Big Agency"
+BR.GOATBuildCountry = "England"
 BR.DetectedPosition = nil
 BR.ChoiceIndex = {}
 BR.EventTitleIndex = {}
@@ -404,6 +416,20 @@ function BR.refreshCareerMeta()
         BR.CurrentOverall = overall
     end
 
+    local peak = BR.readCareerNumber(
+        {"peak", "peakOverall", "careerPeak", "bestOverall", "peakOvr"},
+        20,
+        250
+    )
+    if peak ~= nil then
+        BR.CurrentPeak = peak
+    elseif BR.CurrentOverall ~= nil then
+        BR.CurrentPeak = math.max(
+            tonumber(BR.CurrentPeak) or 0,
+            BR.CurrentOverall
+        )
+    end
+
     local rep = BR.readCareerNumber(
         {"rep", "reputation"},
         -1000,
@@ -430,6 +456,49 @@ function BR.refreshCareerMeta()
     if luck ~= nil then
         BR.CurrentLuck = luck
     end
+end
+
+function BR.careerPhase()
+    BR.refreshCareerMeta()
+
+    local age = tonumber(BR.CurrentAge) or 18
+    local overall = tonumber(BR.CurrentOverall) or 0
+    local peak = tonumber(BR.CurrentPeak) or overall
+    local potential = tonumber(BR.ActualPotential)
+
+    local target = tonumber(BR.TargetPeakOverall) or 98
+
+    if potential ~= nil then
+        -- Do not ask the optimizer to chase above a genuinely lower true
+        -- potential, but still aim close to the maximum available.
+        target = math.min(target, math.max(90, potential - 2))
+    end
+
+    if age <= 24 and peak < target then
+        return "DEVELOPMENT"
+    end
+
+    if age <= 30 and peak < target then
+        return "PEAK PUSH"
+    end
+
+    if peak < 95 then
+        return "LATE PEAK PUSH"
+    end
+
+    return "LEGACY"
+end
+
+function BR.phaseText()
+    local phase = BR.careerPhase()
+    local peak = tonumber(BR.CurrentPeak) or tonumber(BR.CurrentOverall) or 0
+    local target = tonumber(BR.TargetPeakOverall) or 98
+
+    return phase
+        .. " | peak "
+        .. tostring(peak)
+        .. "/"
+        .. tostring(target)
 end
 
 function BR.findScoutEstimate()
@@ -684,44 +753,61 @@ function BR.statImpact(key, amount)
     local weight = weights[key] or 0
 
     if key == "technique" then
-        local total = (weights.tir or 0) + (weights.passe or 0) + (weights.dribble or 0)
+        local total =
+            (weights.tir or 0)
+            + (weights.passe or 0)
+            + (weights.dribble or 0)
         weight = total / 3
     elseif key == "physique" then
-        local total = (weights.vitesse or 0) + (weights.puissance or 0) + (weights.defense or 0)
+        local total =
+            (weights.vitesse or 0)
+            + (weights.puissance or 0)
+            + (weights.defense or 0)
         weight = total / 3
     end
 
-    local potentialGap = 0
-    if BR.ActualPotential ~= nil and BR.CurrentOverall ~= nil then
-        potentialGap = math.max(0, BR.ActualPotential - BR.CurrentOverall)
-    end
+    local phase = BR.careerPhase()
+    local age = tonumber(BR.CurrentAge) or 18
+    local peak = tonumber(BR.CurrentPeak) or tonumber(BR.CurrentOverall) or 0
+    local potential = tonumber(BR.ActualPotential) or 100
 
-    -- When there is still a large gap to the fixed potential, stat gains are
-    -- much more valuable than tiny "safe" rating gains.
-    local gapMult = 1 + math.clamp(potentialGap / 35, 0, 1.8)
+    local gap = math.max(
+        0,
+        math.min(potential, BR.TargetPeakOverall or 98) - peak
+    )
 
-    local age = tonumber(BR.CurrentAge) or 24
-    local youthMult = 1
+    local gapMult = 1 + math.clamp(gap / 18, 0, 2.7)
+
+    local ageMult = 1
     if age <= 19 then
-        youthMult = 1.35
+        ageMult = 1.65
     elseif age <= 22 then
-        youthMult = 1.20
-    elseif age >= 30 then
-        youthMult = 0.82
+        ageMult = 1.45
+    elseif age <= 25 then
+        ageMult = 1.25
+    elseif age >= 31 then
+        ageMult = 0.72
     end
 
     local base
-    if BR.FocusMode == "Potential Development" then
-        base = amount * (34 + weight * 180)
+
+    if phase == "DEVELOPMENT" then
+        base = amount * (55 + weight * 300)
+    elseif phase == "PEAK PUSH" then
+        base = amount * (42 + weight * 250)
+    elseif phase == "LATE PEAK PUSH" then
+        base = amount * (34 + weight * 210)
+    elseif BR.FocusMode == "Potential Development" then
+        base = amount * (32 + weight * 180)
     elseif BR.FocusMode == "GOAT Career" then
-        base = amount * (22 + weight * 135)
+        base = amount * (20 + weight * 130)
     elseif BR.FocusMode == "Career Max" then
         base = amount * (11 + weight * 95)
     else
         base = amount * (3 + weight * 35)
     end
 
-    return base * gapMult * youthMult
+    return base * gapMult * ageMult
 end
 
 function BR.effectScore(effects)
@@ -812,25 +898,41 @@ function BR.effectScore(effects)
         score = score - math.abs(tonumber(effects.suspend) or 1) * 120
     end
 
-    -- Injury is especially bad for developing a high-potential career:
-    -- missed weeks = fewer matches/training + possible early retirement.
+    -- Injuries are one of the biggest GOAT killers: they cost matches,
+    -- training time and can eventually cut the career short.
     if effects.injury then
         local injury = tonumber(effects.injury) or 1
+        local age = tonumber(BR.CurrentAge) or 18
+        local phase = BR.careerPhase()
 
         if injury > 0 then
-            local injuryWeight =
-                focus == "Potential Development" and 180
-                or focus == "GOAT Career" and 140
-                or 70
+            local injuryWeight = 190
+
+            if phase == "DEVELOPMENT" then
+                injuryWeight = 330
+            elseif phase == "PEAK PUSH" then
+                injuryWeight = 300
+            elseif phase == "LATE PEAK PUSH" then
+                injuryWeight = 360
+            elseif phase == "LEGACY" then
+                injuryWeight = 300
+            end
+
+            if age >= 30 then
+                injuryWeight = injuryWeight * 1.45
+            end
+            if age >= 34 then
+                injuryWeight = injuryWeight * 1.35
+            end
 
             score = score - injury * injuryWeight
         elseif injury < 0 then
-            score = score + math.abs(injury) * 110
+            score = score + math.abs(injury) * 260
         end
     end
 
-    if effects.heal == true then score = score + 500 end
-    if effects.healHalf == true then score = score + 240 end
+    if effects.heal == true then score = score + 900 end
+    if effects.healHalf == true then score = score + 480 end
 
     for _, stat in ipairs(BR.StatKeys) do
         if effects[stat] ~= nil then
@@ -862,33 +964,59 @@ function BR.effectScore(effects)
 
     local developmentMult =
         1
-        + math.clamp(potentialGap / 30, 0, 2)
-        + (age <= 19 and 0.45 or (age <= 22 and 0.25 or 0))
+        + math.clamp(potentialGap / 22, 0, 3)
+        + (age <= 19 and 0.70 or (age <= 22 and 0.42 or 0))
 
-    if focus == "GOAT Career" then
-        xpWeight = 3.6 * developmentMult
-        formeWeight = 20
-        moralWeight = 7
-        disciplineWeight = 12
-        coachWeight = 12
+    local phase = BR.careerPhase()
+
+    if phase == "DEVELOPMENT" then
+        xpWeight = 8.5 * developmentMult
+        formeWeight = 34
+        moralWeight = 8
+        disciplineWeight = 22
+        coachWeight = 22
         dressingWeight = 6
-        repWeight = 19
-    elseif focus == "Potential Development" then
+        repWeight = 16
+    elseif phase == "PEAK PUSH" then
+        xpWeight = 6.5 * developmentMult
+        formeWeight = 31
+        moralWeight = 8
+        disciplineWeight = 20
+        coachWeight = 20
+        dressingWeight = 7
+        repWeight = 18
+    elseif phase == "LATE PEAK PUSH" then
         xpWeight = 5.0 * developmentMult
-        formeWeight = 27
-        moralWeight = 7
+        formeWeight = 34
+        moralWeight = 8
+        disciplineWeight = 18
+        coachWeight = 18
+        dressingWeight = 7
+        repWeight = 20
+    elseif focus == "GOAT Career" then
+        xpWeight = 3.8 * developmentMult
+        formeWeight = 26
+        moralWeight = 8
         disciplineWeight = 15
-        coachWeight = 15
-        dressingWeight = 4
-        repWeight = 13
-    elseif focus == "Career Max" then
-        xpWeight = 2.8 * developmentMult
-        formeWeight = 15
-        moralWeight = 7
-        disciplineWeight = 12
-        coachWeight = 10
+        coachWeight = 14
+        dressingWeight = 8
+        repWeight = 22
+    elseif focus == "Potential Development" then
+        xpWeight = 5.5 * developmentMult
+        formeWeight = 30
+        moralWeight = 8
+        disciplineWeight = 18
+        coachWeight = 18
         dressingWeight = 5
-        repWeight = 11
+        repWeight = 15
+    elseif focus == "Career Max" then
+        xpWeight = 3.0 * developmentMult
+        formeWeight = 18
+        moralWeight = 7
+        disciplineWeight = 13
+        coachWeight = 11
+        dressingWeight = 6
+        repWeight = 13
     end
 
     score = score + (tonumber(effects.xp) or 0) * xpWeight
@@ -1198,64 +1326,68 @@ function BR.goatDynamicUtility(candidate)
     local expected = tonumber(candidate.ExpectedRating) or 0
     local best = tonumber(candidate.BestRating) or 0
     local safeProb = tonumber(candidate.SafeProbability) or 0
+    local phase = BR.careerPhase()
+    local age = tonumber(BR.CurrentAge) or 18
 
-    -- Direct career performance still matters, but unlike "Never Minus" we
-    -- do not throw away a +2 rating / goal chance merely because the 5-20%
-    -- failure tail is negative.
-    utility = utility
-        + expected * 240
-        + best * 45
-        + safeProb * 35
+    if phase == "DEVELOPMENT" then
+        utility = utility
+            + expected * 125
+            + best * 30
+            + safeProb * 20
+    elseif phase == "PEAK PUSH"
+        or phase == "LATE PEAK PUSH" then
+        utility = utility
+            + expected * 180
+            + best * 45
+            + safeProb * 25
+    else
+        utility = utility
+            + expected * 300
+            + best * 80
+            + safeProb * 40
+    end
 
+    -- High-percentage star actions are worth taking. The previous versions
+    -- were sometimes too conservative and left goals/assists on the table.
     if chance ~= nil then
-        if chance >= 90 then
-            utility = utility + 120
-        elseif chance >= 82 then
-            utility = utility + 70
-        elseif chance >= 72 then
-            utility = utility + 20
+        if chance >= 92 then
+            utility = utility + 210
+        elseif chance >= 86 then
+            utility = utility + 135
+        elseif chance >= 78 then
+            utility = utility + 65
+        elseif chance >= 68 then
+            utility = utility + 15
         elseif chance < 55 then
-            utility = utility - (55 - chance) * 8
+            utility = utility - (55 - chance) * 10
         end
     end
 
-    -- Tail-risk penalty. High-chance rolls are allowed to be aggressive;
-    -- low-chance catastrophic rolls are not.
+    -- Protect the career from low-probability disaster choices.
     if worst < 0 then
         local downside = math.abs(worst)
-        local penaltyScale = 165
+        local penaltyScale = 180
 
-        if chance ~= nil and chance >= 88 then
-            penaltyScale = 35
-        elseif chance ~= nil and chance >= 80 then
-            penaltyScale = 70
-        elseif chance ~= nil and chance >= 70 then
-            penaltyScale = 115
+        if chance ~= nil and chance >= 92 then
+            penaltyScale = 28
+        elseif chance ~= nil and chance >= 86 then
+            penaltyScale = 50
+        elseif chance ~= nil and chance >= 78 then
+            penaltyScale = 90
+        elseif chance ~= nil and chance >= 68 then
+            penaltyScale = 135
+        end
+
+        if age >= 32 then
+            penaltyScale = penaltyScale * 1.20
         end
 
         utility = utility - downside * penaltyScale
     end
 
-    if worst <= -1.2 and (chance == nil or chance < 72) then
-        utility = utility - 300
-    end
-
-    -- Early in a high-potential career, growth has to happen NOW because the
-    -- game's age XP multiplier falls sharply later.
-    local age = tonumber(BR.CurrentAge) or 24
-    local gap = 0
-    if BR.ActualPotential ~= nil and BR.CurrentOverall ~= nil then
-        gap = math.max(0, BR.ActualPotential - BR.CurrentOverall)
-    end
-
-    if age <= 22 and gap >= 12 then
-        utility = utility + math.max(0, tonumber(candidate.Score) or 0) * 0.10
-    elseif age >= 30 then
-        -- In the decline years protect performance and avoid unnecessary risk.
-        utility = utility + expected * 90
-        if worst < -0.8 then
-            utility = utility - 120
-        end
+    if worst <= -1.4
+        and (chance == nil or chance < 72) then
+        utility = utility - 420
     end
 
     return utility
@@ -1708,6 +1840,137 @@ function BR.looksLikeTransferOffer(button)
     return hasMoney and hasContractSuffix
 end
 
+function BR.findBuildButton(english)
+    return BR.findVisibleButtonByEnglishText(english)
+end
+
+function BR.runNewCareerBuild()
+    if not BR.AutoNewCareerBuild then
+        return false
+    end
+
+    local desired = {
+        "Striker",
+        BR.GOATBuildOrigin,
+        BR.GOATBuildTeen,
+        BR.GOATBuildEntourage,
+        BR.GOATBuildCountry
+    }
+
+    for _, english in ipairs(desired) do
+        local button = BR.findBuildButton(english)
+
+        if button then
+            return BR.policyClick(
+                button,
+                "GOAT build: " .. tostring(english)
+            )
+        end
+    end
+
+    return false
+end
+
+function BR.ancestorContainsEnglish(root, english, maxDepth)
+    local current = root
+
+    for _ = 1, (maxDepth or 6) do
+        if not current then
+            break
+        end
+
+        for _, value in ipairs(BR.allTexts(current)) do
+            if BR.textMatchesEnglish(value, english) then
+                return true, current
+            end
+        end
+
+        current = current.Parent
+    end
+
+    return false, nil
+end
+
+function BR.findStaffBuyButton(staffName)
+    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+        if object:IsA("GuiButton")
+            and BR.isActuallyVisible(object) then
+
+            local isBuy = false
+
+            for _, value in ipairs(BR.buttonTexts(object)) do
+                if BR.textMatchesEnglish(value, "BUY") then
+                    isBuy = true
+                    break
+                end
+            end
+
+            if isBuy then
+                local found = BR.ancestorContainsEnglish(
+                    object.Parent,
+                    staffName,
+                    7
+                )
+
+                if found then
+                    return object
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+function BR.runStaffPolicy()
+    if not BR.AutoStaffPolicy then
+        return false
+    end
+
+    if os.clock() - (BR.LastStaffScanAt or 0) < 1.5 then
+        return false
+    end
+
+    BR.LastStaffScanAt = os.clock()
+
+    local money = BR.currentMoney()
+    if money == nil then
+        return false
+    end
+
+    -- Coach first for +30% progression. If he is not affordable yet,
+    -- Nutritionist is bought instead because halving injury frequency is
+    -- enormously valuable for long careers.
+    local priority = {
+        "coach",
+        "nutri",
+        "media",
+        "agent"
+    }
+
+    for _, id in ipairs(priority) do
+        local staff = BR.Config.STAFF_BY_ID
+            and BR.Config.STAFF_BY_ID[id]
+
+        if staff then
+            local price = tonumber(staff.price) or 0
+
+            if money >= price then
+                local button = BR.findStaffBuyButton(staff.name)
+
+                if button then
+                    return BR.policyClick(
+                        button,
+                        "Buy staff: " .. tostring(staff.name)
+                    )
+                end
+            end
+        end
+    end
+
+    return false
+end
+
 function BR.bestStarterSignButton()
     local best = nil
 
@@ -1885,16 +2148,23 @@ function BR.runCareerPolicy()
         return false
     end
 
-    -- IMPORTANT: the normal retirement question starts at age 33, while
-    -- forced retirement is much later. Ending at the first prompt throws
-    -- away many seasons of goals, caps and trophy chances.
+    if BR.AutoNewCareerBuild then
+        local buildActed = BR.runNewCareerBuild()
+        if buildActed then
+            return true
+        end
+    end
+
+    -- Max-legacy mode keeps playing at the normal retirement prompts.
+    -- The game keeps the career record even if a later injury eventually
+    -- forces the end, so more seasons mean more opportunities for output.
     local continueButton =
         BR.findVisibleButtonByEnglishText("Go again for one more season")
 
     if continueButton then
         return BR.policyClick(
             continueButton,
-            "Continue career - do not retire at the first age prompt"
+            "GOAT legacy: one more season"
         )
     end
 
@@ -1920,6 +2190,14 @@ function BR.runCareerPolicy()
                 and "Sign best ELITE starter club"
                 or "Sign strongest starter offer"
         )
+    end
+
+    if BR.AutoStaffPolicy then
+        local staffActed = BR.runStaffPolicy()
+
+        if staffActed then
+            return true
+        end
     end
 
     if BR.AutoTransferPolicy then
@@ -2222,7 +2500,7 @@ BR.PolicyParagraph = BR.Tabs.Main:AddParagraph({
 
 BR.FullAutopilotToggle = BR.Tabs.Main:AddToggle("FullGOATAutopilot", {
     Title = "Full GOAT Autopilot",
-    Description = "Turns on best event choices, best identity, career policy, ELITE transfer policy and automatic career flow.",
+    Description = "Full best-player build: peak-first development, event optimizer, GOAT identity, new-career build, staff purchases, ELITE transfers, national team and career flow.",
     Default = false
 })
 
@@ -2232,6 +2510,8 @@ BR.FullAutopilotToggle:OnChanged(function(value)
     BR.AutoIdentity = BR.FullAutopilot
     BR.AutoCareerPolicy = BR.FullAutopilot
     BR.AutoTransferPolicy = BR.FullAutopilot
+    BR.AutoNewCareerBuild = BR.FullAutopilot
+    BR.AutoStaffPolicy = BR.FullAutopilot
     BR.AutoCareerFlow = BR.FullAutopilot
 
     pcall(function()
@@ -2239,6 +2519,8 @@ BR.FullAutopilotToggle:OnChanged(function(value)
         BR.AutoIdentityToggle:SetValue(BR.AutoIdentity)
         BR.CareerPolicyToggle:SetValue(BR.AutoCareerPolicy)
         BR.TransferPolicyToggle:SetValue(BR.AutoTransferPolicy)
+        BR.NewCareerBuildToggle:SetValue(BR.AutoNewCareerBuild)
+        BR.StaffPolicyToggle:SetValue(BR.AutoStaffPolicy)
         BR.CareerFlowToggle:SetValue(BR.AutoCareerFlow)
     end)
 end)
@@ -2271,6 +2553,26 @@ BR.CareerPolicyToggle = BR.Tabs.Main:AddToggle("AutoCareerPolicy", {
 
 BR.CareerPolicyToggle:OnChanged(function(value)
     BR.AutoCareerPolicy = value == true
+end)
+
+BR.NewCareerBuildToggle = BR.Tabs.Main:AddToggle("AutoGOATBuild", {
+    Title = "Auto GOAT New-Career Build",
+    Description = "For a fresh career chooses Striker, Academy, Football Nothing Else, Big Agency and England when those screens appear.",
+    Default = false
+})
+
+BR.NewCareerBuildToggle:OnChanged(function(value)
+    BR.AutoNewCareerBuild = value == true
+end)
+
+BR.StaffPolicyToggle = BR.Tabs.Main:AddToggle("AutoGOATStaff", {
+    Title = "Auto GOAT Staff",
+    Description = "Whenever the staff purchase cards are visible, buys Personal Coach first, then Nutritionist, Media Advisor and Pro Agent if affordable.",
+    Default = false
+})
+
+BR.StaffPolicyToggle:OnChanged(function(value)
+    BR.AutoStaffPolicy = value == true
 end)
 
 BR.TransferPolicyToggle = BR.Tabs.Main:AddToggle("AutoEliteTransfers", {
@@ -2393,6 +2695,7 @@ BR.Tabs.Setup:AddButton({
         BR.ActualPotential = nil
         BR.PotentialSource = "-"
         BR.CurrentOverall = nil
+        BR.CurrentPeak = nil
         BR.CurrentReputation = nil
         BR.CurrentAge = nil
         BR.CurrentLuck = nil
@@ -2500,8 +2803,10 @@ task.spawn(function()
                 "TRUE Potential: " .. truePot
                 .. "\nScout estimate: " .. scout
                 .. "\nOverall: " .. tostring(BR.CurrentOverall or "-")
+                .. " | Peak: " .. tostring(BR.CurrentPeak or "-")
                 .. " | Reputation: " .. tostring(BR.CurrentReputation or "-")
                 .. " | Age: " .. tostring(BR.CurrentAge or "-")
+                .. "\nPhase: " .. BR.phaseText()
                 .. note
             )
 
@@ -2514,18 +2819,25 @@ task.spawn(function()
                 "Target peak: " .. tostring(BR.TargetPeakOverall)
                 .. "+"
                 .. "\nTarget career score: " .. tostring(BR.TargetCareerPoints)
-                .. "+ (max end-roll tier)"
+                .. "+"
+                .. "\nATT benchmark: " .. tostring(BR.TargetGoalsATT)
+                .. "+ goals | " .. tostring(BR.TargetBallons)
+                .. "+ Ballon d'Or"
                 .. "\nPotential gap remaining: " .. gapText
-                .. "\nStrategy: grow hard early, take high-chance match upside, avoid low-chance disasters."
+                .. "\nStrategy: DEVELOPMENT -> PEAK PUSH -> LEGACY."
+                .. "\nYoung years prioritize weighted stats + XP; after the peak, output/trophies dominate."
             )
 
             BR.PolicyParagraph:SetDesc(
                 "Career policy: " .. tostring(BR.AutoCareerPolicy)
-                .. " | Transfers: " .. tostring(BR.AutoTransferPolicy)
+                .. " | Build: " .. tostring(BR.AutoNewCareerBuild)
+                .. " | Staff: " .. tostring(BR.AutoStaffPolicy)
+                .. "\nTransfers: " .. tostring(BR.AutoTransferPolicy)
                 .. " | Flow: " .. tostring(BR.AutoCareerFlow)
                 .. "\nLast action: " .. tostring(BR.LastPolicyAction or "-")
-                .. "\nRetirement rule: continue at normal prompts; forced retirement is handled by the game."
-                .. "\nNational team: always accept."
+                .. "\nGOAT build: ATT / Academy / Football Nothing Else / Big Agency / England"
+                .. "\nStaff priority: Personal Coach -> Nutritionist -> Media -> Agent"
+                .. "\nNational team: always accept | Retirement: maximize legacy."
             )
 
             BR.DebugParagraph:SetDesc(
@@ -2550,7 +2862,9 @@ task.spawn(function()
                     .. "-"
                     .. tostring(BR.ScoutEstimateHigh or "-")
                     .. "\nOverall: " .. tostring(BR.CurrentOverall or "-")
+                    .. " | Peak: " .. tostring(BR.CurrentPeak or "-")
                     .. " | Rep: " .. tostring(BR.CurrentReputation or "-")
+                    .. "\nPhase: " .. tostring(BR.careerPhase())
                     .. "\nFocus: " .. tostring(BR.FocusMode)
                     .. " | Risk: " .. tostring(BR.RiskMode)
                     .. "\nKnown choices: " .. tostring((BR.LastScanInfo or {}).Known or 0)
@@ -2565,6 +2879,18 @@ task.spawn(function()
             local ok = false
             pcall(function()
                 ok = BR.runCareerPolicy()
+            end)
+            policyActed = ok == true
+        elseif BR.AutoStaffPolicy then
+            local ok = false
+            pcall(function()
+                ok = BR.runStaffPolicy()
+            end)
+            policyActed = ok == true
+        elseif BR.AutoNewCareerBuild then
+            local ok = false
+            pcall(function()
+                ok = BR.runNewCareerBuild()
             end)
             policyActed = ok == true
         end
@@ -2639,6 +2965,8 @@ function BR:Stop()
     self.AutoCareerPolicy = false
     self.AutoCareerFlow = false
     self.AutoTransferPolicy = false
+    self.AutoNewCareerBuild = false
+    self.AutoStaffPolicy = false
     self.FullAutopilot = false
 
     pcall(function()
@@ -2650,7 +2978,7 @@ BR.findStats()
 BR.Window:SelectTab(1)
 
 warn(
-    "[BestRating] V5 GOAT AUTOPILOT ready | choices:",
+    "[BestRating] V6 GOAT MAX ready | choices:",
     tostring((function()
         local n = 0
         for _ in pairs(BR.ChoiceIndex) do
