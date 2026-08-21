@@ -1,6 +1,6 @@
-warn("[BestRating] V2 SAFE loaded")
+warn("[BestRating] V3 TRUE POTENTIAL loaded")
 
--- Best Rating Optimizer V2 SAFE
+-- Best Rating Optimizer V3 TRUE POTENTIAL
 -- Game detected from the supplied dump: START YOUR SOCCER CAREER!
 -- Uses the game's own ReplicatedStorage.DayFoot.Config + Events data.
 -- It does NOT change ratingDelta, roll chances, or server data.
@@ -19,7 +19,7 @@ getgenv().BestRatingOptimizer = BR
 BR.Alive = true
 BR.AutoChoice = false
 BR.AutoIdentity = false
-BR.FocusMode = "Rating Focus"
+BR.FocusMode = "GOAT Career"
 BR.RiskMode = "Never Minus"
 BR.PositionMode = "Auto"
 BR.SkipPaidWhenMoneyUnknown = true
@@ -33,6 +33,14 @@ BR.Stats = nil
 BR.StatsOwner = nil
 BR.CurrentMoney = nil
 BR.MoneySource = "-"
+BR.ActualPotential = nil
+BR.PotentialSource = "-"
+BR.CurrentOverall = nil
+BR.CurrentReputation = nil
+BR.CurrentAge = nil
+BR.CurrentLuck = nil
+BR.ScoutEstimateLow = nil
+BR.ScoutEstimateHigh = nil
 BR.DetectedPosition = nil
 BR.ChoiceIndex = {}
 BR.EventTitleIndex = {}
@@ -324,6 +332,152 @@ function BR.currentMoney()
     return BR.CurrentMoney
 end
 
+function BR.stateCandidates()
+    local result = {}
+    local seen = {}
+
+    local function add(tbl)
+        if type(tbl) == "table" and not seen[tbl] then
+            seen[tbl] = true
+            table.insert(result, tbl)
+        end
+    end
+
+    add(BR.Stats)
+    add(BR.StatsOwner)
+
+    if type(BR.StatsOwner) == "table" then
+        for _, key in ipairs({
+            "stats", "player", "career", "profile",
+            "data", "state", "current", "save"
+        }) do
+            add(BR.StatsOwner[key])
+        end
+    end
+
+    return result
+end
+
+function BR.readCareerNumber(keys, minValue, maxValue)
+    for _, tbl in ipairs(BR.stateCandidates()) do
+        for _, key in ipairs(keys) do
+            local value = tonumber(tbl[key])
+
+            if value ~= nil
+                and (minValue == nil or value >= minValue)
+                and (maxValue == nil or value <= maxValue) then
+                return value, tostring(key)
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+function BR.refreshCareerMeta()
+    local pot, potKey = BR.readCareerNumber(
+        {"pot", "potential", "truePotential", "potentialMax", "maxPotential"},
+        40,
+        250
+    )
+
+    if pot ~= nil then
+        BR.ActualPotential = pot
+        BR.PotentialSource = tostring(potKey)
+    end
+
+    local overall = BR.readCareerNumber(
+        {"ovr", "overall", "gen", "ratingOverall"},
+        20,
+        250
+    )
+    if overall ~= nil then
+        BR.CurrentOverall = overall
+    end
+
+    local rep = BR.readCareerNumber(
+        {"rep", "reputation"},
+        -1000,
+        1000
+    )
+    if rep ~= nil then
+        BR.CurrentReputation = rep
+    end
+
+    local age = BR.readCareerNumber(
+        {"age"},
+        10,
+        100
+    )
+    if age ~= nil then
+        BR.CurrentAge = age
+    end
+
+    local luck = BR.readCareerNumber(
+        {"luck", "careerLuck", "fortune"},
+        -1000000,
+        1000000
+    )
+    if luck ~= nil then
+        BR.CurrentLuck = luck
+    end
+end
+
+function BR.findScoutEstimate()
+    local bestLow = nil
+    local bestHigh = nil
+
+    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+        if (object:IsA("TextLabel") or object:IsA("TextButton"))
+            and BR.isActuallyVisible(object)
+            and type(object.Text) == "string" then
+
+            local low, high = string.match(
+                object.Text,
+                "(%d+)%s*[%-%–—]%s*(%d+)"
+            )
+
+            low = tonumber(low)
+            high = tonumber(high)
+
+            if low and high
+                and low >= 40
+                and high <= 250
+                and low <= high
+                and high - low <= 50 then
+
+                local parentText = ""
+                local parent = object.Parent
+
+                if parent then
+                    for _, sibling in ipairs(parent:GetDescendants()) do
+                        if (sibling:IsA("TextLabel") or sibling:IsA("TextButton"))
+                            and type(sibling.Text) == "string" then
+                            parentText = parentText .. " " .. BR.norm(sibling.Text)
+                        end
+                    end
+                end
+
+                if string.find(parentText, "potential", 1, true)
+                    or string.find(parentText, "potenzial", 1, true)
+                    or string.find(parentText, "potentiel", 1, true)
+                    or string.find(parentText, "potencial", 1, true) then
+                    bestLow = low
+                    bestHigh = high
+                    break
+                end
+            end
+        end
+    end
+
+    if bestLow and bestHigh then
+        BR.ScoutEstimateLow = bestLow
+        BR.ScoutEstimateHigh = bestHigh
+    end
+
+    return BR.ScoutEstimateLow, BR.ScoutEstimateHigh
+end
+
 function BR.scoreStatTable(tbl, parent)
     if type(tbl) ~= "table" then
         return nil
@@ -364,10 +518,21 @@ function BR.scoreStatTable(tbl, parent)
         score = score + 500
     end
 
-    for _, key in ipairs({"ovr", "overall", "gen", "pot", "potential", "age"}) do
+    for _, key in ipairs({
+        "ovr", "overall", "gen",
+        "pot", "potential", "truePotential", "potentialMax",
+        "age", "rep", "reputation", "luck"
+    }) do
         if tonumber(tbl[key]) or tonumber(owner[key]) then
-            score = score + 35
+            score = score + 45
         end
+    end
+
+    if tonumber(tbl.pot)
+        or tonumber(tbl.potential)
+        or tonumber(owner.pot)
+        or tonumber(owner.potential) then
+        score = score + 300
     end
 
     local money, moneySource = BR.moneyFromTables(tbl, owner)
@@ -438,6 +603,7 @@ function BR.findStats()
     end
 
     BR.currentMoney()
+    BR.refreshCareerMeta()
     return BR.Stats
 end
 
@@ -516,7 +682,11 @@ function BR.statImpact(key, amount)
         weight = total / 3
     end
 
-    if BR.FocusMode == "Career Max" then
+    if BR.FocusMode == "Potential Development" then
+        return amount * (32 + weight * 170)
+    elseif BR.FocusMode == "GOAT Career" then
+        return amount * (20 + weight * 125)
+    elseif BR.FocusMode == "Career Max" then
         return amount * (10 + weight * 90)
     end
 
@@ -529,19 +699,58 @@ function BR.effectScore(effects)
     end
 
     local score = 0
+    local focus = BR.FocusMode
 
-    -- Direct match-rating change dominates Rating Focus.
-    local ratingWeight = BR.FocusMode == "Rating Focus" and 1000 or 420
+    local ratingWeight = 1000
+    if focus == "GOAT Career" then
+        ratingWeight = 520
+    elseif focus == "Potential Development" then
+        ratingWeight = 250
+    elseif focus == "Career Max" then
+        ratingWeight = 420
+    end
+
     score = score + (tonumber(effects.ratingDelta) or 0) * ratingWeight
 
-    -- Match actions that usually feed the rating/result indirectly.
-    if effects.goal == true then score = score + 180 end
-    if effects.assist == true then score = score + 130 end
-    if effects.save == true then score = score + 150 end
-    if effects.cleanSheet == true or effects.cs == true then score = score + 120 end
-    if effects.concede == true then score = score - 180 end
-    if effects.red == true or effects.redCard == true then score = score - 220 end
-    if effects.injury then score = score - math.abs(tonumber(effects.injury) or 1) * 45 end
+    if effects.goal == true then
+        score = score + (focus == "Rating Focus" and 180 or 260)
+    end
+    if effects.assist == true then
+        score = score + (focus == "Rating Focus" and 130 or 210)
+    end
+    if effects.save == true then
+        score = score + (focus == "Rating Focus" and 150 or 230)
+    end
+    if effects.cleanSheet == true or effects.cs == true then
+        score = score + (focus == "Rating Focus" and 120 or 190)
+    end
+
+    if effects.concede == true then score = score - 240 end
+    if effects.red == true or effects.redCard == true then score = score - 420 end
+    if effects.cardYellow == true then score = score - 45 end
+    if effects.suspend then
+        score = score - math.abs(tonumber(effects.suspend) or 1) * 120
+    end
+
+    -- Injury is especially bad for developing a high-potential career:
+    -- missed weeks = fewer matches/training + possible early retirement.
+    if effects.injury then
+        local injury = tonumber(effects.injury) or 1
+
+        if injury > 0 then
+            local injuryWeight =
+                focus == "Potential Development" and 180
+                or focus == "GOAT Career" and 140
+                or 70
+
+            score = score - injury * injuryWeight
+        elseif injury < 0 then
+            score = score + math.abs(injury) * 110
+        end
+    end
+
+    if effects.heal == true then score = score + 500 end
+    if effects.healHalf == true then score = score + 240 end
 
     for _, stat in ipairs(BR.StatKeys) do
         if effects[stat] ~= nil then
@@ -557,20 +766,66 @@ function BR.effectScore(effects)
         score = score + BR.statImpact("physique", effects.physique)
     end
 
-    local careerMultiplier = BR.FocusMode == "Career Max" and 1.8 or 1
+    local xpWeight = 1.4
+    local formeWeight = 8
+    local moralWeight = 4
+    local disciplineWeight = 7
+    local coachWeight = 5
+    local dressingWeight = 3
+    local repWeight = 3
 
-    score = score + (tonumber(effects.xp) or 0) * 1.4 * careerMultiplier
-    score = score + (tonumber(effects.forme) or 0) * 8 * careerMultiplier
-    score = score + (tonumber(effects.moral) or 0) * 4 * careerMultiplier
-    score = score + (tonumber(effects.discipline) or 0) * 7 * careerMultiplier
-    score = score + (tonumber(effects.relCoach) or 0) * 5 * careerMultiplier
-    score = score + (tonumber(effects.vestiaire) or 0) * 3 * careerMultiplier
-    score = score + (tonumber(effects.rep) or 0) * 3 * careerMultiplier
+    if focus == "GOAT Career" then
+        xpWeight = 3.0
+        formeWeight = 18
+        moralWeight = 7
+        disciplineWeight = 12
+        coachWeight = 10
+        dressingWeight = 6
+        repWeight = 18
+    elseif focus == "Potential Development" then
+        xpWeight = 4.2
+        formeWeight = 24
+        moralWeight = 7
+        disciplineWeight = 14
+        coachWeight = 13
+        dressingWeight = 4
+        repWeight = 12
+    elseif focus == "Career Max" then
+        xpWeight = 2.5
+        formeWeight = 14
+        moralWeight = 7
+        disciplineWeight = 12
+        coachWeight = 9
+        dressingWeight = 5
+        repWeight = 10
+    end
 
-    -- Money matters, but should not override a major rating/stat gain.
+    score = score + (tonumber(effects.xp) or 0) * xpWeight
+    score = score + (tonumber(effects.forme) or 0) * formeWeight
+    score = score + (tonumber(effects.moral) or 0) * moralWeight
+    score = score + (tonumber(effects.discipline) or 0) * disciplineWeight
+    score = score + (tonumber(effects.relCoach) or 0) * coachWeight
+    score = score + (tonumber(effects.vestiaire) or 0) * dressingWeight
+    score = score + (tonumber(effects.rep) or 0) * repWeight
+
+    -- Reputation is especially useful while scouts are uncertain because the
+    -- displayed estimate becomes more accurate as reputation rises.
+    if BR.CurrentReputation ~= nil and BR.CurrentReputation < 50 then
+        score = score + (tonumber(effects.rep) or 0) * (
+            focus == "GOAT Career" and 8
+            or focus == "Potential Development" and 6
+            or 2
+        )
+    end
+
     local money = tonumber(effects.money) or 0
     if money ~= 0 then
-        score = score + math.clamp(money / 5000, -20, 20)
+        local moneyDivisor =
+            focus == "GOAT Career" and 3000
+            or focus == "Potential Development" and 5000
+            or 5000
+
+        score = score + math.clamp(money / moneyDivisor, -80, 80)
     end
 
     return score
@@ -1238,8 +1493,30 @@ function BR.statsText()
         and (BR.short(money) .. " (" .. tostring(BR.MoneySource) .. ")")
         or "unknown"
 
+    BR.refreshCareerMeta()
+    BR.findScoutEstimate()
+
+    local potentialText = BR.ActualPotential ~= nil
+        and (BR.short(BR.ActualPotential) .. " [" .. tostring(BR.PotentialSource) .. "]")
+        or "hidden / not detected"
+
+    local scoutText = (
+        BR.ScoutEstimateLow ~= nil and BR.ScoutEstimateHigh ~= nil
+    )
+        and (
+            tostring(BR.ScoutEstimateLow)
+            .. "-"
+            .. tostring(BR.ScoutEstimateHigh)
+        )
+        or "not visible"
+
     return "Player stats: " .. table.concat(parts, " | ")
         .. "\nMoney: " .. moneyText
+        .. "\nOverall: " .. tostring(BR.CurrentOverall or "-")
+        .. " | Reputation: " .. tostring(BR.CurrentReputation or "-")
+        .. " | Age: " .. tostring(BR.CurrentAge or "-")
+        .. "\nTRUE Potential: " .. potentialText
+        .. "\nScout estimate: " .. scoutText
 end
 
 function BR.bestText(best)
@@ -1354,6 +1631,11 @@ BR.IdentityParagraph = BR.Tabs.Main:AddParagraph({
     Content = "Scanning..."
 })
 
+BR.CareerParagraph = BR.Tabs.Main:AddParagraph({
+    Title = "Career / Potential",
+    Content = "Scanning true potential and scout estimate..."
+})
+
 BR.AutoToggle = BR.Tabs.Main:AddToggle("AutoBestChoice", {
     Title = "Auto Best Choice",
     Description = "Clicks the highest-scoring visible event choice automatically.",
@@ -1403,8 +1685,10 @@ BR.Tabs.Main:AddButton({
 
 BR.FocusDropdown = BR.Tabs.Setup:AddDropdown("FocusMode", {
     Title = "Optimizer Focus",
-    Description = "Rating Focus strongly prioritizes direct match ratingDelta. Career Max gives more weight to long-term stats.",
+    Description = "GOAT Career balances match rating, stat growth, XP, reputation and injury avoidance. Potential Development pushes growth toward your fixed true potential.",
     Values = {
+        "GOAT Career",
+        "Potential Development",
         "Rating Focus",
         "Career Max"
     },
@@ -1468,6 +1752,14 @@ BR.Tabs.Setup:AddButton({
         BR.StatsOwner = nil
         BR.CurrentMoney = nil
         BR.MoneySource = "-"
+        BR.ActualPotential = nil
+        BR.PotentialSource = "-"
+        BR.CurrentOverall = nil
+        BR.CurrentReputation = nil
+        BR.CurrentAge = nil
+        BR.CurrentLuck = nil
+        BR.ScoutEstimateLow = nil
+        BR.ScoutEstimateHigh = nil
         BR.DetectedPosition = nil
         BR.findStats()
 
@@ -1537,6 +1829,44 @@ task.spawn(function()
             BR.StatusParagraph:SetDesc(BR.bestText(best))
             BR.IdentityParagraph:SetDesc(BR.identityText())
 
+            BR.refreshCareerMeta()
+            BR.findScoutEstimate()
+
+            local truePot = BR.ActualPotential ~= nil
+                and (
+                    tostring(BR.ActualPotential)
+                    .. " (client state: "
+                    .. tostring(BR.PotentialSource)
+                    .. ")"
+                )
+                or "not detected"
+
+            local scout = (
+                BR.ScoutEstimateLow ~= nil
+                and BR.ScoutEstimateHigh ~= nil
+            )
+                and (
+                    tostring(BR.ScoutEstimateLow)
+                    .. "-"
+                    .. tostring(BR.ScoutEstimateHigh)
+                )
+                or "not visible"
+
+            local note = BR.ActualPotential ~= nil
+                and BR.ScoutEstimateHigh ~= nil
+                and BR.ActualPotential > BR.ScoutEstimateHigh
+                and "\nScout estimate is BELOW true potential. This does not mean your potential dropped."
+                or "\nScout estimate is only an estimate; reputation improves its accuracy."
+
+            BR.CareerParagraph:SetDesc(
+                "TRUE Potential: " .. truePot
+                .. "\nScout estimate: " .. scout
+                .. "\nOverall: " .. tostring(BR.CurrentOverall or "-")
+                .. " | Reputation: " .. tostring(BR.CurrentReputation or "-")
+                .. " | Age: " .. tostring(BR.CurrentAge or "-")
+                .. note
+            )
+
             BR.DebugParagraph:SetDesc(
                 "Indexed choice texts: "
                     .. tostring((function()
@@ -1553,6 +1883,13 @@ task.spawn(function()
                     )
                     .. "\nPosition: " .. tostring(BR.currentPosition() or "-")
                     .. "\n" .. BR.statsText()
+                    .. "\nTRUE Potential: " .. tostring(BR.ActualPotential or "-")
+                    .. " | Scout: "
+                    .. tostring(BR.ScoutEstimateLow or "-")
+                    .. "-"
+                    .. tostring(BR.ScoutEstimateHigh or "-")
+                    .. "\nOverall: " .. tostring(BR.CurrentOverall or "-")
+                    .. " | Rep: " .. tostring(BR.CurrentReputation or "-")
                     .. "\nFocus: " .. tostring(BR.FocusMode)
                     .. " | Risk: " .. tostring(BR.RiskMode)
                     .. "\nKnown choices: " .. tostring((BR.LastScanInfo or {}).Known or 0)
@@ -1623,7 +1960,7 @@ BR.findStats()
 BR.Window:SelectTab(1)
 
 warn(
-    "[BestRating] V2 SAFE ready | choices:",
+    "[BestRating] V3 TRUE POTENTIAL ready | choices:",
     tostring((function()
         local n = 0
         for _ in pairs(BR.ChoiceIndex) do
