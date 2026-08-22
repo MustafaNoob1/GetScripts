@@ -1,6 +1,6 @@
-warn("[BestRating] V7 STATEFIX GOAT loaded")
+warn("[BestRating] V7 LAGFIX MOBILE loaded")
 
--- Best Rating Optimizer V7 STATEFIX GOAT
+-- Best Rating Optimizer V7 LAGFIX MOBILE
 -- Game detected from the supplied dump: START YOUR SOCCER CAREER!
 -- Uses the game's own ReplicatedStorage.DayFoot.Config + Events data.
 -- It does NOT change ratingDelta, roll chances, or server data.
@@ -29,7 +29,14 @@ BR.FocusMode = "GOAT Career"
 BR.RiskMode = "GOAT Dynamic"
 BR.PositionMode = "Auto"
 BR.SkipPaidWhenMoneyUnknown = true
-BR.ScanDelay = 0.18
+BR.ScanDelay = 0.40
+BR.UIRefreshInterval = 0.90
+BR.LastUIRefresh = 0
+BR.GuiCacheInterval = 0.35
+BR.LastGuiCacheAt = -math.huge
+BR.GuiCache = {}
+BR.LastScoutScanAt = -math.huge
+BR.ScoutScanInterval = 4.0
 BR.LastClickAt = 0
 BR.LastClickButton = nil
 BR.ClickLockUntil = 0
@@ -47,7 +54,9 @@ BR.CareerState = nil
 BR.CareerStateSource = "-"
 BR.CareerStateScore = 0
 BR.LastCareerStateScan = -math.huge
-BR.CareerStateScanInterval = 1.20
+BR.CareerStateScanInterval = 20.0
+BR.CareerStateScanRunning = false
+BR.CareerStateScanChunk = 220
 BR.ActualPotential = nil
 BR.PotentialSource = "-"
 BR.CurrentPotMin = nil
@@ -117,6 +126,31 @@ function BR.norm(value)
     s = string.gsub(s, "%s+$", "")
 
     return s
+end
+
+function BR.invalidateGuiCache()
+    BR.LastGuiCacheAt = -math.huge
+end
+
+function BR.guiObjects(force)
+    local now = os.clock()
+
+    if force
+        or type(BR.GuiCache) ~= "table"
+        or now - (BR.LastGuiCacheAt or -math.huge)
+            >= (BR.GuiCacheInterval or 0.35) then
+
+        local ok, objects = pcall(function()
+            return BR.PlayerGui:GetDescendants()
+        end)
+
+        if ok and type(objects) == "table" then
+            BR.GuiCache = objects
+            BR.LastGuiCacheAt = now
+        end
+    end
+
+    return BR.GuiCache or {}
 end
 
 function BR.short(value)
@@ -434,84 +468,163 @@ function BR.careerStateScore(tbl)
     return score
 end
 
+function BR.adoptCareerState(state, source, score)
+    if type(state) ~= "table" then
+        return false
+    end
+
+    local stateScore = tonumber(score) or BR.careerStateScore(state)
+    if stateScore < 24 then
+        return false
+    end
+
+    BR.CareerState = state
+    BR.CareerStateScore = stateScore
+    BR.CareerStateSource = tostring(source or "career state")
+
+    local statePosition =
+        BR.validPosition(state.position)
+        or BR.validPosition(state.pos)
+
+    if statePosition then
+        BR.DetectedPosition = statePosition
+    end
+
+    if type(state.stats) == "table" then
+        BR.Stats = state.stats
+        BR.StatsOwner = state
+    elseif BR.StatsOwner == nil then
+        BR.StatsOwner = state
+    end
+
+    local money = tonumber(state.money)
+    if money ~= nil then
+        BR.CurrentMoney = money
+        BR.MoneySource = "CareerState.money"
+    end
+
+    return true
+end
+
 function BR.findCareerState(force)
-    if type(getgc) ~= "function" then
-        return BR.CareerState
-    end
+    -- If the lightweight telemetry scanner is running, reuse its already-found
+    -- state instead of doing another getgc scan.
+    local external = getgenv().GOATResearchScanner
+    if type(external) == "table"
+        and type(external.CareerState) == "table" then
 
-    if not force
-        and BR.CareerState ~= nil
-        and os.clock() - (BR.LastCareerStateScan or -math.huge)
-            < (BR.CareerStateScanInterval or 1.20) then
-        return BR.CareerState
-    end
-
-    BR.LastCareerStateScan = os.clock()
-
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then
-        return BR.CareerState
-    end
-
-    local best = BR.CareerState
-    local bestScore = BR.careerStateScore(best)
-
-    local function consider(tbl, source)
-        if type(tbl) ~= "table" then
-            return
-        end
-
-        local score = BR.careerStateScore(tbl)
-
-        if score > bestScore then
-            best = tbl
-            bestScore = score
-            BR.CareerStateSource = tostring(source or "getgc")
+        local externalScore = BR.careerStateScore(external.CareerState)
+        if externalScore >= 24 then
+            BR.adoptCareerState(
+                external.CareerState,
+                "GOATResearchScanner",
+                externalScore
+            )
+            return BR.CareerState
         end
     end
 
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            consider(object, "getgc")
+    local now = os.clock()
+    local current = BR.CareerState
 
-            for _, key in ipairs({
-                "career",
-                "player",
-                "profile",
-                "data",
-                "state",
-                "current",
-                "save"
-            }) do
-                if type(object[key]) == "table" then
-                    consider(object[key], "getgc." .. tostring(key))
-                end
+    if type(current) == "table" then
+        local score = BR.careerStateScore(current)
+        if score >= 24 then
+            BR.CareerStateScore = score
+
+            -- Keep using the live table immediately. A slow background refresh
+            -- is enough to notice a completely new career later.
+            if not force
+                and now - (BR.LastCareerStateScan or -math.huge)
+                    < (BR.CareerStateScanInterval or 20) then
+                return current
             end
         end
     end
 
-    -- The real DayFoot career table contains age/position/ovr/money and
-    -- usually potMin/potMax. Requiring a meaningful score prevents Config,
-    -- event and translation tables from winning the scan.
-    if best and bestScore >= 24 then
-        BR.CareerState = best
-        BR.CareerStateScore = bestScore
-
-        local statePosition =
-            BR.validPosition(best.position)
-            or BR.validPosition(best.pos)
-
-        if statePosition then
-            BR.DetectedPosition = statePosition
-        end
-
-        if type(best.stats) == "table" then
-            BR.Stats = best.stats
-            BR.StatsOwner = best
-        elseif BR.StatsOwner == nil then
-            BR.StatsOwner = best
-        end
+    if type(getgc) ~= "function" then
+        return BR.CareerState
     end
+
+    if BR.CareerStateScanRunning then
+        return BR.CareerState
+    end
+
+    if not force
+        and now - (BR.LastCareerStateScan or -math.huge)
+            < (BR.CareerStateScanInterval or 20) then
+        return BR.CareerState
+    end
+
+    BR.LastCareerStateScan = now
+    BR.CareerStateScanRunning = true
+
+    task.spawn(function()
+        local ok, objects = pcall(getgc, true)
+
+        if not ok or type(objects) ~= "table" then
+            BR.CareerStateScanRunning = false
+            return
+        end
+
+        local best = BR.CareerState
+        local bestScore = BR.careerStateScore(best)
+        local bestSource = BR.CareerStateSource
+        local chunk = tonumber(BR.CareerStateScanChunk) or 220
+
+        local function consider(tbl, source)
+            if type(tbl) ~= "table" then
+                return
+            end
+
+            local score = BR.careerStateScore(tbl)
+            if score > bestScore then
+                best = tbl
+                bestScore = score
+                bestSource = source
+            end
+        end
+
+        for index, object in ipairs(objects) do
+            if not BR.Alive then
+                break
+            end
+
+            if type(object) == "table" then
+                consider(object, "getgc")
+
+                for _, key in ipairs({
+                    "career",
+                    "player",
+                    "profile",
+                    "data",
+                    "state",
+                    "current",
+                    "save"
+                }) do
+                    local child = rawget(object, key)
+                    if type(child) == "table" then
+                        consider(child, "getgc." .. tostring(key))
+                    end
+                end
+            end
+
+            -- Yield regularly so mobile Roblox/Delta remains responsive.
+            if index % chunk == 0 then
+                task.wait()
+            end
+        end
+
+        if best and bestScore >= 24 then
+            BR.adoptCareerState(
+                best,
+                bestSource or "getgc",
+                bestScore
+            )
+        end
+
+        BR.CareerStateScanRunning = false
+    end)
 
     return BR.CareerState
 end
@@ -737,10 +850,24 @@ function BR.phaseText()
 end
 
 function BR.findScoutEstimate()
+    if BR.CurrentPotMin ~= nil and BR.CurrentPotMax ~= nil then
+        BR.ScoutEstimateLow = BR.CurrentPotMin
+        BR.ScoutEstimateHigh = BR.CurrentPotMax
+        return BR.ScoutEstimateLow, BR.ScoutEstimateHigh
+    end
+
+    local now = os.clock()
+    if now - (BR.LastScoutScanAt or -math.huge)
+        < (BR.ScoutScanInterval or 4.0) then
+        return BR.ScoutEstimateLow, BR.ScoutEstimateHigh
+    end
+
+    BR.LastScoutScanAt = now
+
     local bestLow = nil
     local bestHigh = nil
 
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if (object:IsA("TextLabel") or object:IsA("TextButton"))
             and BR.isActuallyVisible(object)
             and type(object.Text) == "string" then
@@ -864,7 +991,7 @@ function BR.scoreStatTable(tbl, parent)
 end
 
 function BR.findStats()
-    local careerState = BR.findCareerState(true)
+    local careerState = BR.findCareerState(false)
 
     if type(careerState) == "table" then
         BR.StatsOwner = careerState
@@ -885,71 +1012,6 @@ function BR.findStats()
         if money ~= nil then
             BR.CurrentMoney = money
             BR.MoneySource = "CareerState.money"
-        end
-
-        BR.refreshCareerMeta()
-
-        -- The live career table is more trustworthy than a generic stats table.
-        -- If it exposes its nested stats table, use it immediately.
-        if type(BR.Stats) == "table" then
-            return BR.Stats
-        end
-    end
-
-    if type(getgc) ~= "function" then
-        return BR.Stats
-    end
-
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then
-        return BR.Stats
-    end
-
-    local best = nil
-
-    local function consider(tbl, parent)
-        local candidate = BR.scoreStatTable(tbl, parent)
-
-        if candidate
-            and (not best or candidate.Score > best.Score) then
-            best = candidate
-        end
-    end
-
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            consider(object, object)
-
-            for key, value in pairs(object) do
-                if type(value) == "table" then
-                    local k = BR.norm(key)
-
-                    if k == "stats"
-                        or k == "player"
-                        or k == "career"
-                        or k == "profile"
-                        or k == "data"
-                        or k == "state" then
-                        consider(value, object)
-                    end
-                end
-            end
-        end
-    end
-
-    if best then
-        BR.Stats = best.Stats
-
-        -- Never throw away the high-confidence live career owner.
-        BR.StatsOwner = BR.CareerState or best.Owner
-        BR.DetectedPosition =
-            BR.DetectedPosition
-            or best.Position
-
-        if BR.CurrentMoney == nil and best.Money ~= nil then
-            BR.CurrentMoney = best.Money
-            BR.MoneySource =
-                "career." .. tostring(best.MoneySource or "money")
         end
     end
 
@@ -980,7 +1042,7 @@ function BR.currentPosition()
         return BR.DetectedPosition
     end
 
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if object:IsA("TextLabel") and object.Visible then
             local pos = BR.validPosition(object.Text)
             if pos then
@@ -1845,7 +1907,7 @@ function BR.currentVisibleEvent()
     local best = nil
     local bestLength = 0
 
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if (object:IsA("TextLabel") or object:IsA("TextButton"))
             and BR.isActuallyVisible(object)
             and type(object.Text) == "string" then
@@ -1879,7 +1941,7 @@ function BR.bestVisibleChoice()
         Event = currentEvent
     }
 
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if object:IsA("GuiButton") and BR.isActuallyVisible(object) then
             local texts = BR.buttonTexts(object)
             local matched = nil
@@ -2029,7 +2091,7 @@ end
 function BR.findVisibleButtonByText(targetText)
     local target = BR.norm(targetText)
 
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if object:IsA("GuiButton") and BR.isActuallyVisible(object) then
             for _, text in ipairs(BR.buttonTexts(object)) do
                 if BR.norm(text) == target then
@@ -2054,7 +2116,7 @@ function BR.textMatchesEnglish(text, english)
 end
 
 function BR.findVisibleButtonByEnglishText(english)
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if object:IsA("GuiButton") and BR.isActuallyVisible(object) then
             for _, value in ipairs(BR.buttonTexts(object)) do
                 if BR.textMatchesEnglish(value, english) then
@@ -2068,7 +2130,7 @@ function BR.findVisibleButtonByEnglishText(english)
 end
 
 function BR.hasVisibleEnglishText(english)
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if (object:IsA("TextLabel") or object:IsA("TextButton"))
             and BR.isActuallyVisible(object)
             and type(object.Text) == "string"
@@ -2240,7 +2302,7 @@ function BR.ancestorContainsEnglish(root, english, maxDepth)
 end
 
 function BR.findStaffBuyButton(staffName)
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if object:IsA("GuiButton")
             and BR.isActuallyVisible(object) then
 
@@ -2322,7 +2384,7 @@ end
 function BR.bestStarterSignButton()
     local best = nil
 
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if object:IsA("GuiButton")
             and BR.isActuallyVisible(object) then
 
@@ -2362,7 +2424,7 @@ function BR.bestTransferButton()
     local best = nil
     local stay = BR.findVisibleButtonByEnglishText("Stay")
 
-    for _, object in ipairs(BR.PlayerGui:GetDescendants()) do
+    for _, object in ipairs(BR.guiObjects()) do
         if BR.looksLikeTransferOffer(object) then
             local elite = BR.cardHasText(object, "ELITE")
             local salary = BR.cardMoney(object) or 0
@@ -2475,6 +2537,8 @@ function BR.policyClick(button, label)
     local ok = BR.click(button)
 
     if ok then
+        BR.invalidateGuiCache()
+
         pcall(function()
             BR.Fluent:Notify({
                 Title = "GOAT Career Policy",
@@ -2622,6 +2686,8 @@ function BR.tryChoice(best)
     local ok = BR.click(button)
 
     if ok then
+        BR.invalidateGuiCache()
+
         -- If the same enabled choice is still sitting there after the click,
         -- the game most likely rejected it (typically insufficient money or
         -- another requirement). Temporarily blacklist it so the next-best
@@ -2884,6 +2950,11 @@ BR.StateFixParagraph = BR.Tabs.Main:AddParagraph({
     Content = "Scanning the real DayFoot career table..."
 })
 
+BR.Tabs.Main:AddParagraph({
+    Title = "Mobile Performance",
+    Content = "LagFix: one shared GUI cache, UI refresh ~1/sec, and career-state getgc scans run asynchronously in small chunks instead of blocking the game."
+})
+
 BR.PolicyParagraph = BR.Tabs.Main:AddParagraph({
     Title = "GOAT Career Policy",
     Content = "Handles retirement, national team, starter club and optional transfers."
@@ -3092,6 +3163,8 @@ BR.Tabs.Setup:AddButton({
         BR.CareerStateSource = "-"
         BR.CareerStateScore = 0
         BR.LastCareerStateScan = -math.huge
+        BR.CareerStateScanRunning = false
+        BR.invalidateGuiCache()
         BR.ActualPotential = nil
         BR.PotentialSource = "-"
         BR.CurrentPotMin = nil
@@ -3168,8 +3241,12 @@ task.spawn(function()
 
         BR.LastBest = best
 
-        pcall(function()
-            BR.StatusParagraph:SetDesc(BR.bestText(best))
+        if os.clock() - (BR.LastUIRefresh or 0)
+            >= (BR.UIRefreshInterval or 0.90) then
+            BR.LastUIRefresh = os.clock()
+
+            pcall(function()
+                BR.StatusParagraph:SetDesc(BR.bestText(best))
             BR.IdentityParagraph:SetDesc(BR.identityText())
 
             BR.refreshCareerMeta()
@@ -3303,7 +3380,8 @@ task.spawn(function()
                     .. " | affordable: " .. tostring((BR.LastScanInfo or {}).Affordable or 0)
                     .. " | too expensive: " .. tostring((BR.LastScanInfo or {}).Unaffordable or 0)
             )
-        end)
+            end)
+        end
 
         local policyActed = false
 
@@ -3410,7 +3488,7 @@ BR.findStats()
 BR.Window:SelectTab(1)
 
 warn(
-    "[BestRating] V7 STATEFIX GOAT ready | choices:",
+    "[BestRating] V7 LAGFIX MOBILE ready | choices:",
     tostring((function()
         local n = 0
         for _ in pairs(BR.ChoiceIndex) do
