@@ -1,21 +1,49 @@
-warn("[GOATScanner] V1 START")
+warn("[GOATScanner] V2 LITE START")
 
--- GOAT Research Scanner V1
--- Read-only scanner/telemetry for START YOUR SOCCER CAREER!
--- Creates GOATScan_FullDump.txt + GOATScan_LiveTelemetry.txt
--- No FireServer/InvokeServer and no outbound remote hooks.
+-- GOAT Research Scanner V2 LITE
+-- Designed to run alongside BestRatingOptimizer_V6_GOAT_MAX.
+--
+-- This version intentionally avoids the heavy operations that can freeze/crash
+-- mobile executors:
+--   * no decompile loop
+--   * no getconstants/proto scan
+--   * no listener on every RemoteEvent
+--   * no full PlayerGui dump every 0.45s
+--   * no getgc() every frame
+--
+-- Output:
+--   GOATScan_LiteTelemetry.txt
+--   GOATScan_LiteSummary.txt
 
 local S = {}
 getgenv().GOATResearchScanner = S
+
 S.Alive = true
-S.Telemetry = {}
-S.TelemetryChars = 0
-S.RemoteConnections = {}
-S.LastStateFP = ""
-S.LastEventFP = ""
-S.LastUiFP = ""
+S.StartedAt = os.time()
+S.Lines = {}
+S.MaxLines = 12000
 S.LastFlush = 0
-S.MaxTelemetryChars = 2500000
+S.FlushEvery = 12
+S.PollEvery = 1.10
+
+S.LastStateFP = ""
+S.LastDecisionFP = ""
+S.LastPolicyFP = ""
+S.LastEventFP = ""
+S.LastCareerRefScan = -math.huge
+S.CareerState = nil
+S.CareerStateScore = 0
+
+S.EventCounts = {}
+S.ChoiceCounts = {}
+S.PolicyCounts = {}
+S.MinOverall = nil
+S.MaxOverall = nil
+S.MaxPeak = nil
+S.StartOverall = nil
+S.EndOverall = nil
+S.StartAge = nil
+S.EndAge = nil
 
 S.Players = game:GetService("Players")
 S.RS = game:GetService("ReplicatedStorage")
@@ -23,434 +51,828 @@ S.Player = S.Players.LocalPlayer
 S.Gui = S.Player:WaitForChild("PlayerGui")
 S.DayFoot = S.RS:FindFirstChild("DayFoot")
 
-function S.norm(v)
-    local s = string.lower(tostring(v or ""))
-    s = s:gsub("’", "'"):gsub("“", '"'):gsub("”", '"'):gsub("–", "-"):gsub("—", "-")
-    s = s:gsub("<.->", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
-    return s
-end
+--------------------------------------------------
+-- HELPERS
+--------------------------------------------------
 
-function S.path(inst)
-    local ok, v = pcall(function() return inst:GetFullName() end)
-    return ok and tostring(v) or tostring(inst)
+function S.norm(value)
+    local s = string.lower(tostring(value or ""))
+    s = s:gsub("’", "'")
+        :gsub("“", '"')
+        :gsub("”", '"')
+        :gsub("–", "-")
+        :gsub("—", "-")
+        :gsub("<.->", " ")
+        :gsub("%s+", " ")
+        :gsub("^%s+", "")
+        :gsub("%s+$", "")
+    return s
 end
 
 function S.ts()
     return os.date("!%Y-%m-%dT%H:%M:%SZ")
 end
 
-function S.clip(v, n)
-    local s = tostring(v or "")
-    n = n or 1000
-    return #s > n and (s:sub(1, n) .. "...<truncated>") or s
+function S.clip(value, maxLen)
+    local s = tostring(value or "")
+    maxLen = maxLen or 600
+    if #s > maxLen then
+        return s:sub(1, maxLen) .. "...<truncated>"
+    end
+    return s
 end
 
-function S.serialize(v, depth, seen)
-    depth = depth or 0
-    seen = seen or {}
-    if depth > 7 then return "<max-depth>" end
-    local t = typeof(v)
-    if t == "nil" then return "nil" end
-    if t == "string" then return string.format("%q", S.clip(v, 1600)) end
-    if t == "number" or t == "boolean" then return tostring(v) end
-    if t == "Instance" then return "<Instance " .. S.path(v) .. ">" end
-    if t ~= "table" then return "<" .. t .. " " .. S.clip(v, 200) .. ">" end
-    if seen[v] then return "<cycle>" end
-    seen[v] = true
-    local out, c = {}, 0
-    for k, x in pairs(v) do
-        c += 1
-        if c > 450 then table.insert(out, "<table capped>") break end
-        table.insert(out, "[" .. S.serialize(k, depth+1, seen) .. "]=" .. S.serialize(x, depth+1, seen))
+function S.path(inst)
+    local ok, value = pcall(function()
+        return inst:GetFullName()
+    end)
+    return ok and tostring(value) or tostring(inst)
+end
+
+function S.serializeFlat(tbl, keys)
+    if type(tbl) ~= "table" then
+        return "none"
     end
-    seen[v] = nil
-    return "{" .. table.concat(out, ",") .. "}"
+
+    local parts = {}
+
+    for _, key in ipairs(keys) do
+        local value = rawget(tbl, key)
+
+        if value ~= nil and type(value) ~= "table" then
+            table.insert(parts, tostring(key) .. "=" .. S.clip(value, 180))
+        end
+    end
+
+    return table.concat(parts, " | ")
 end
 
 function S.write(name, data)
-    if type(writefile) ~= "function" then return false end
-    local ok, err = pcall(function() writefile(name, tostring(data or "")) end)
-    if not ok then warn("[GOATScanner] write failed", name, err) end
+    if type(writefile) ~= "function" then
+        return false
+    end
+
+    local ok, err = pcall(function()
+        writefile(name, tostring(data or ""))
+    end)
+
+    if not ok then
+        warn("[GOATScanner] write failed:", name, err)
+    end
+
     return ok
 end
 
-function S.log(kind, payload)
-    local line = "[" .. S.ts() .. "][" .. tostring(kind) .. "] " .. tostring(payload or "")
-    table.insert(S.Telemetry, line)
-    S.TelemetryChars += #line + 1
-    print("[GOATScanner]", kind, payload)
-    if S.TelemetryChars > S.MaxTelemetryChars then
+function S.log(kind, message)
+    local line =
+        "[" .. S.ts() .. "]"
+        .. "[" .. tostring(kind or "INFO") .. "] "
+        .. tostring(message or "")
+
+    table.insert(S.Lines, line)
+
+    if #S.Lines > S.MaxLines then
+        -- Keep only recent telemetry instead of growing without bound.
         local keep = {}
-        for i = math.floor(#S.Telemetry/2), #S.Telemetry do table.insert(keep, S.Telemetry[i]) end
-        S.Telemetry = keep
-        S.TelemetryChars = #table.concat(keep, "\n")
+        local startIndex = math.floor(#S.Lines * 0.40)
+
+        for i = startIndex, #S.Lines do
+            table.insert(keep, S.Lines[i])
+        end
+
+        S.Lines = keep
     end
 end
 
 function S.flush()
-    S.write("GOATScan_LiveTelemetry.txt", table.concat(S.Telemetry, "\n"))
+    S.write(
+        "GOATScan_LiteTelemetry.txt",
+        table.concat(S.Lines, "\n")
+    )
+
     S.LastFlush = os.clock()
 end
 
--- Load known, safe game data.
-S.Config, S.Events = nil, nil
+--------------------------------------------------
+-- EVENT INDEX (SMALL / SAFE)
+--------------------------------------------------
+
+S.Events = nil
+S.EventTitles = {}
+S.ChoiceTexts = {}
+
 if S.DayFoot then
-    local c = S.DayFoot:FindFirstChild("Config")
-    local e = S.DayFoot:FindFirstChild("Events")
-    if c and c:IsA("ModuleScript") then pcall(function() S.Config = require(c) end) end
-    if e and e:IsA("ModuleScript") then pcall(function() S.Events = require(e) end) end
+    local eventsModule = S.DayFoot:FindFirstChild("Events")
+
+    if eventsModule and eventsModule:IsA("ModuleScript") then
+        pcall(function()
+            S.Events = require(eventsModule)
+        end)
+    end
 end
 
-S.EventTitles, S.ChoiceTexts = {}, {}
 function S.indexEvents(node, seen)
-    if type(node) ~= "table" then return end
+    if type(node) ~= "table" then
+        return
+    end
+
     seen = seen or {}
-    if seen[node] then return end
+    if seen[node] then
+        return
+    end
     seen[node] = true
-    if type(node.id) == "string" and type(node.title) == "string" and type(node.choices) == "table" then
+
+    if type(node.id) == "string"
+        and type(node.title) == "string"
+        and type(node.choices) == "table" then
+
         S.EventTitles[S.norm(node.title)] = node
-        for i, choice in ipairs(node.choices) do
-            if type(choice) == "table" and type(choice.text) == "string" then
-                local k = S.norm(choice.text)
-                S.ChoiceTexts[k] = S.ChoiceTexts[k] or {}
-                table.insert(S.ChoiceTexts[k], {Event=node, Choice=choice, Index=i})
+
+        for index, choice in ipairs(node.choices) do
+            if type(choice) == "table"
+                and type(choice.text) == "string" then
+
+                local key = S.norm(choice.text)
+                S.ChoiceTexts[key] = S.ChoiceTexts[key] or {}
+
+                table.insert(S.ChoiceTexts[key], {
+                    Event = node,
+                    Choice = choice,
+                    Index = index
+                })
             end
         end
     end
-    for k, x in pairs(node) do
-        if type(x) == "table" and k ~= "choices" then S.indexEvents(x, seen) end
-    end
-end
-if S.Events then S.indexEvents(S.Events, {}) end
 
-local FULL = {}
-local function F(...)
-    local p = {}
-    for i=1,select("#",...) do p[i] = tostring(select(i,...)) end
-    table.insert(FULL, table.concat(p, " "))
-end
-
-F("============================================================")
-F("GOAT RESEARCH SCANNER V1")
-F("============================================================")
-F("Timestamp:", S.ts())
-F("PlaceId:", game.PlaceId, "GameId:", game.GameId, "JobId:", game.JobId)
-F("Player:", S.Player and S.Player.Name or "?")
-if type(identifyexecutor) == "function" then
-    local ok, a, b = pcall(identifyexecutor)
-    if ok then F("Executor:", a, b or "") end
-end
-F("")
-F("================ DAYFOOT CONFIG ================")
-F(S.serialize(S.Config))
-F("")
-F("================ DAYFOOT EVENTS ================")
-F(S.serialize(S.Events))
-F("")
-
--- Remotes + DayFoot tree/attributes.
-F("================ REMOTES ================")
-local remoteCount = 0
-for _, o in ipairs(S.RS:GetDescendants()) do
-    if o:IsA("RemoteEvent") or o:IsA("RemoteFunction") or o.ClassName == "UnreliableRemoteEvent" then
-        remoteCount += 1
-        F(remoteCount .. ".", o.ClassName, S.path(o))
-    end
-end
-F("Remote count:", remoteCount)
-F("")
-F("================ DAYFOOT TREE / ATTRIBUTES ================")
-if S.DayFoot then
-    local list = {S.DayFoot}
-    for _, o in ipairs(S.DayFoot:GetDescendants()) do table.insert(list, o) end
-    for _, o in ipairs(list) do
-        local attrs = {}
-        pcall(function() attrs = o:GetAttributes() end)
-        F(o.ClassName, S.path(o), "ATTRS=" .. S.serialize(attrs))
-    end
-end
-F("")
-
--- Script source dump.
-F("================ CLIENT SOURCES ================")
-local scripts, seenScripts = {}, {}
-local function addScript(inst, reason)
-    if typeof(inst) ~= "Instance" or not inst:IsA("LuaSourceContainer") then return end
-    local p = S.path(inst)
-    if seenScripts[p] then return end
-    seenScripts[p] = true
-    table.insert(scripts, {Inst=inst, Reason=reason})
-end
-if S.DayFoot then for _, o in ipairs(S.DayFoot:GetDescendants()) do addScript(o, "DayFoot") end end
-local ps = S.Player:FindFirstChild("PlayerScripts")
-if ps then for _, o in ipairs(ps:GetDescendants()) do addScript(o, "PlayerScripts") end end
-if type(getloadedmodules) == "function" then
-    local ok, mods = pcall(getloadedmodules)
-    if ok and type(mods) == "table" then
-        for _, m in ipairs(mods) do
-            local p = S.norm(S.path(m))
-            if p:find("dayfoot",1,true) or p:find("career",1,true) or p:find("soccer",1,true) or p:find("football",1,true) then
-                addScript(m, "loaded relevant")
-            end
+    for key, value in pairs(node) do
+        if type(value) == "table" and key ~= "choices" then
+            S.indexEvents(value, seen)
         end
     end
 end
-for _, getterName in ipairs({"getrunningscripts","getscripts"}) do
-    local getter = getgenv()[getterName]
-    if type(getter) == "function" then
-        local ok, arr = pcall(getter)
-        if ok and type(arr) == "table" then
-            for _, inst in ipairs(arr) do
-                local p = S.norm(S.path(inst))
-                if p:find("dayfoot",1,true) or p:find("career",1,true) or p:find("playerscripts",1,true) then addScript(inst, getterName) end
-            end
-        end
-    end
-end
-F("Candidates:", #scripts)
-for i, info in ipairs(scripts) do
-    F("")
-    F("------------------------------------------------------------")
-    F("SCRIPT", i, S.path(info.Inst), "reason=" .. info.Reason)
-    F("------------------------------------------------------------")
-    if type(decompile) == "function" then
-        local ok, src = pcall(function() return decompile(info.Inst) end)
-        F(ok and type(src)=="string" and src or ("[DECOMPILE FAILED] " .. tostring(src)))
-    else
-        F("[decompile unavailable]")
-    end
-    if i % 10 == 0 then task.wait() end
-end
-F("")
 
--- Relevant GC function metadata/constants.
-F("================ GC FUNCTION HINTS ================")
-if type(getgc) == "function" then
-    local ok, arr = pcall(getgc, true)
-    if ok and type(arr) == "table" then
-        local n = 0
-        for _, obj in ipairs(arr) do
-            if type(obj) == "function" then
-                local name, src = "", ""
-                if type(debug)=="table" and type(debug.info)=="function" then
-                    pcall(function() name = tostring(debug.info(obj,"n") or ""); src = tostring(debug.info(obj,"s") or "") end)
-                end
-                local z = S.norm(name .. " " .. src)
-                if z:find("dayfoot",1,true) or z:find("career",1,true) or z:find("score",1,true) or z:find("potential",1,true) or z:find("retire",1,true) or z:find("staff",1,true) or z:find("transfer",1,true) then
-                    n += 1
-                    F("FUNCTION", n, "name="..name, "source="..src)
-                    if type(getconstants)=="function" then
-                        local okc, c = pcall(getconstants, obj)
-                        if okc and type(c)=="table" then F("CONSTANTS=", S.serialize(c)) end
-                    end
-                    if n >= 250 then F("<function hints capped>") break end
-                end
-            end
-        end
-    end
+if S.Events then
+    S.indexEvents(S.Events, {})
 end
-F("")
 
--- Career-state discovery.
+--------------------------------------------------
+-- CAREER STATE
+--------------------------------------------------
+
 S.StateKeys = {
-    "name","age","season","seasons","position","pos","ovr","overall","gen","peak","peakOverall","careerPeak",
-    "pot","potential","truePotential","potMin","potMax","scoutsUnsure","money","rep","reputation","forme","moral",
-    "discipline","charisme","tir","passe","dribble","vitesse","puissance","defense","mental","xp","club","contract",
-    "playstyle","staff","staffs","staffOwned","injury","injured","suspend","goals","assists","buts","passes","caps",
-    "selections","matches","j","ballons","wc","ucl","trophies","palmares","totals"
+    "name",
+    "age",
+    "season",
+    "seasons",
+    "position",
+    "pos",
+    "ovr",
+    "overall",
+    "gen",
+    "peak",
+    "peakOverall",
+    "careerPeak",
+    "pot",
+    "potential",
+    "truePotential",
+    "potMin",
+    "potMax",
+    "money",
+    "rep",
+    "reputation",
+    "forme",
+    "moral",
+    "discipline",
+    "charisme",
+    "tir",
+    "passe",
+    "dribble",
+    "vitesse",
+    "puissance",
+    "defense",
+    "mental",
+    "xp",
+    "injury",
+    "injured",
+    "suspend",
+    "playstyle",
+    "goals",
+    "assists",
+    "buts",
+    "passes",
+    "caps",
+    "selections",
+    "matches",
+    "j",
+    "ballons",
+    "wc",
+    "ucl",
+    "trophies"
 }
-function S.stateScore(t)
-    if type(t) ~= "table" then return 0 end
-    local s = 0
-    for _, k in ipairs(S.StateKeys) do if rawget(t,k) ~= nil then s += 1 end end
-    for _, k in ipairs({"tir","passe","dribble","vitesse","puissance","defense","mental"}) do
-        local v = tonumber(rawget(t,k)); if v and v>=0 and v<=250 then s += 2 end
+
+function S.stateScore(tbl)
+    if type(tbl) ~= "table" then
+        return 0
     end
-    if rawget(t,"position")~=nil then s+=4 end
-    if rawget(t,"club")~=nil then s+=4 end
-    if rawget(t,"contract")~=nil then s+=4 end
-    if rawget(t,"potMin")~=nil then s+=5 end
-    if rawget(t,"potMax")~=nil then s+=5 end
-    if rawget(t,"money")~=nil then s+=4 end
-    if rawget(t,"age")~=nil then s+=4 end
-    return s
-end
-function S.findStates(maxn)
-    local out = {}
-    if type(getgc) ~= "function" then return out end
-    local ok, arr = pcall(getgc, true)
-    if not ok or type(arr)~="table" then return out end
-    for _, o in ipairs(arr) do
-        if type(o)=="table" then
-            local sc = S.stateScore(o)
-            if sc >= 12 then table.insert(out,{Score=sc,Table=o}) end
+
+    local score = 0
+
+    for _, key in ipairs(S.StateKeys) do
+        if rawget(tbl, key) ~= nil then
+            score = score + 1
         end
     end
-    table.sort(out,function(a,b) return a.Score>b.Score end)
-    while #out > (maxn or 12) do table.remove(out) end
-    return out
-end
-function S.shallowState(t)
-    local out = {}
-    if type(t)~="table" then return out end
-    for _, k in ipairs(S.StateKeys) do
-        local v = rawget(t,k)
-        if v ~= nil then
-            if type(v)=="table" then
-                if k=="club" or k=="contract" or k=="totals" or k=="staff" or k=="staffs" or k=="staffOwned" then out[k]=v else out[k]="<table>" end
-            else out[k]=v end
+
+    for _, key in ipairs({
+        "tir",
+        "passe",
+        "dribble",
+        "vitesse",
+        "puissance",
+        "defense",
+        "mental"
+    }) do
+        local value = tonumber(rawget(tbl, key))
+
+        if value and value >= 0 and value <= 250 then
+            score = score + 2
         end
     end
-    return out
-end
-function S.bestState()
-    local a = S.findStates(5)
-    return a[1] and a[1].Table or nil, a[1] and a[1].Score or 0, a
-end
-F("================ INITIAL CAREER STATE CANDIDATES ================")
-for i, x in ipairs(S.findStates(20)) do F("STATE",i,"score="..x.Score,S.serialize(S.shallowState(x.Table))) end
-F("")
 
--- Save static dump before live monitoring.
-local fullText = table.concat(FULL,"\n")
-S.write("GOATScan_FullDump.txt", fullText)
-warn("[GOATScanner] Full dump saved | chars", #fullText, "scripts", #scripts, "remotes", remoteCount)
+    if rawget(tbl, "age") ~= nil then score = score + 4 end
+    if rawget(tbl, "position") ~= nil then score = score + 4 end
+    if rawget(tbl, "money") ~= nil then score = score + 3 end
+    if rawget(tbl, "potMin") ~= nil then score = score + 4 end
+    if rawget(tbl, "potMax") ~= nil then score = score + 4 end
 
--- UI/event helpers.
-function S.visible(o)
-    if not o or not o.Parent then return false end
-    local c = o
-    while c and c ~= game do
-        if c:IsA("GuiObject") and not c.Visible then return false end
-        if c:IsA("ScreenGui") and not c.Enabled then return false end
-        c = c.Parent
+    return score
+end
+
+function S.optimizer()
+    local br = getgenv().BestRatingOptimizer
+
+    if type(br) == "table" and br.Alive ~= false then
+        return br
     end
+
+    return nil
+end
+
+function S.stateFromOptimizer()
+    local br = S.optimizer()
+
+    if not br then
+        return nil
+    end
+
+    local candidates = {
+        br.StatsOwner,
+        br.Stats
+    }
+
+    for _, candidate in ipairs(candidates) do
+        if type(candidate) == "table"
+            and S.stateScore(candidate) >= 8 then
+            return candidate, "BestRatingOptimizer"
+        end
+    end
+
+    return nil
+end
+
+function S.findStateFallback()
+    -- Fallback only. This runs at most every ~15 seconds, not every frame.
+    if type(getgc) ~= "function" then
+        return nil
+    end
+
+    if os.clock() - S.LastCareerRefScan < 15 then
+        return S.CareerState
+    end
+
+    S.LastCareerRefScan = os.clock()
+
+    local ok, objects = pcall(getgc, true)
+
+    if not ok or type(objects) ~= "table" then
+        return S.CareerState
+    end
+
+    local best = nil
+    local bestScore = 0
+
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local score = S.stateScore(object)
+
+            if score > bestScore then
+                best = object
+                bestScore = score
+            end
+        end
+    end
+
+    if bestScore >= 10 then
+        S.CareerState = best
+        S.CareerStateScore = bestScore
+    end
+
+    return S.CareerState
+end
+
+function S.currentState()
+    local state, source = S.stateFromOptimizer()
+
+    if state then
+        S.CareerState = state
+        S.CareerStateScore = S.stateScore(state)
+        return state, source
+    end
+
+    state = S.findStateFallback()
+
+    if state then
+        return state, "getgc fallback"
+    end
+
+    return nil, "none"
+end
+
+function S.numberFrom(state, keys)
+    if type(state) ~= "table" then
+        return nil
+    end
+
+    for _, key in ipairs(keys) do
+        local value = tonumber(rawget(state, key))
+
+        if value ~= nil then
+            return value
+        end
+    end
+
+    return nil
+end
+
+function S.stateFingerprint(state)
+    if type(state) ~= "table" then
+        return "none"
+    end
+
+    return S.serializeFlat(state, {
+        "age",
+        "season",
+        "position",
+        "ovr",
+        "overall",
+        "peak",
+        "peakOverall",
+        "pot",
+        "potential",
+        "potMin",
+        "potMax",
+        "money",
+        "rep",
+        "reputation",
+        "forme",
+        "moral",
+        "discipline",
+        "tir",
+        "passe",
+        "dribble",
+        "vitesse",
+        "puissance",
+        "defense",
+        "mental",
+        "injury",
+        "injured",
+        "suspend",
+        "playstyle"
+    })
+end
+
+function S.captureState(reason)
+    local state, source = S.currentState()
+
+    if not state then
+        return
+    end
+
+    local overall = S.numberFrom(state, {
+        "ovr",
+        "overall",
+        "gen"
+    })
+
+    local peak = S.numberFrom(state, {
+        "peak",
+        "peakOverall",
+        "careerPeak"
+    }) or overall
+
+    local age = S.numberFrom(state, {"age"})
+
+    if overall ~= nil then
+        S.MinOverall = S.MinOverall == nil
+            and overall
+            or math.min(S.MinOverall, overall)
+
+        S.MaxOverall = S.MaxOverall == nil
+            and overall
+            or math.max(S.MaxOverall, overall)
+
+        S.StartOverall = S.StartOverall or overall
+        S.EndOverall = overall
+    end
+
+    if peak ~= nil then
+        S.MaxPeak = S.MaxPeak == nil
+            and peak
+            or math.max(S.MaxPeak, peak)
+    end
+
+    if age ~= nil then
+        S.StartAge = S.StartAge or age
+        S.EndAge = age
+    end
+
+    S.log(
+        "STATE_" .. tostring(reason or "CHANGE"),
+        "source="
+            .. tostring(source)
+            .. " | "
+            .. S.stateFingerprint(state)
+    )
+end
+
+--------------------------------------------------
+-- EVENT / DECISION OBSERVATION
+--------------------------------------------------
+
+function S.visible(object)
+    if not object or not object.Parent then
+        return false
+    end
+
+    local current = object
+
+    while current and current ~= game do
+        if current:IsA("GuiObject") and not current.Visible then
+            return false
+        end
+
+        if current:IsA("ScreenGui") and not current.Enabled then
+            return false
+        end
+
+        current = current.Parent
+    end
+
     return true
 end
-function S.currentEvent()
-    for _, o in ipairs(S.Gui:GetDescendants()) do
-        if (o:IsA("TextLabel") or o:IsA("TextButton")) and S.visible(o) and type(o.Text)=="string" then
-            local ev = S.EventTitles[S.norm(o.Text)]
-            if ev then return ev end
-        end
-    end
-end
-function S.visibleChoices()
-    local out = {}
-    for _, o in ipairs(S.Gui:GetDescendants()) do
-        if o:IsA("GuiButton") and S.visible(o) then
-            local texts = {}
-            if o:IsA("TextButton") and S.norm(o.Text)~="" then table.insert(texts,o.Text) end
-            for _, c in ipairs(o:GetDescendants()) do
-                if (c:IsA("TextLabel") or c:IsA("TextButton")) and c.Visible and type(c.Text)=="string" and S.norm(c.Text)~="" then table.insert(texts,c.Text) end
+
+function S.currentVisibleEventFallback()
+    for _, object in ipairs(S.Gui:GetDescendants()) do
+        if (object:IsA("TextLabel") or object:IsA("TextButton"))
+            and S.visible(object)
+            and type(object.Text) == "string" then
+
+            local event = S.EventTitles[S.norm(object.Text)]
+
+            if event then
+                return event
             end
-            local hit = false
-            for _, t in ipairs(texts) do if S.ChoiceTexts[S.norm(t)] then hit=true break end end
-            if hit then table.insert(out,{Path=S.path(o),Active=o.Active,Texts=texts}) end
         end
     end
-    return out
+
+    return nil
 end
-function S.uiSnapshot()
-    local out = {}
-    for _, o in ipairs(S.Gui:GetDescendants()) do
-        if (o:IsA("TextLabel") or o:IsA("TextButton")) and S.visible(o) and type(o.Text)=="string" and S.norm(o.Text)~="" then
-            table.insert(out,o.ClassName.."|"..S.path(o).."|"..S.clip(o.Text,600))
+
+function S.currentVisibleEvent()
+    local br = S.optimizer()
+
+    if br and type(br.currentVisibleEvent) == "function" then
+        local ok, event = pcall(br.currentVisibleEvent)
+
+        if ok and type(event) == "table" then
+            return event
         end
     end
-    table.sort(out)
-    return out
+
+    return S.currentVisibleEventFallback()
 end
 
--- Passive incoming RemoteEvent logging only.
-function S.args(...)
-    local out = {}
-    for i=1,math.min(select("#",...),20) do out[i]=S.serialize(select(i,...)) end
-    return table.concat(out," | ")
+function S.currentDecision()
+    local br = S.optimizer()
+
+    if br and type(br.LastBest) == "table" then
+        local best = br.LastBest
+        local event = best.Event
+
+        return {
+            EventId = event and event.id or nil,
+            EventTitle = event and event.title or nil,
+            Choice = best.Choice and best.Choice.text or best.Text,
+            Score = best.Score,
+            Chance = best.Chance,
+            Worst = best.WorstRating,
+            Expected = best.ExpectedRating,
+            Best = best.BestRating,
+            Cost = best.Cost,
+            Phase = type(br.careerPhase) == "function"
+                and br.careerPhase()
+                or nil
+        }
+    end
+
+    return nil
 end
-for _, o in ipairs(S.RS:GetDescendants()) do
-    if o:IsA("RemoteEvent") then
-        local ok, con = pcall(function()
-            return o.OnClientEvent:Connect(function(...)
-                if S.Alive then S.log("REMOTE_IN", S.path(o).." :: "..S.args(...)) end
-            end)
-        end)
-        if ok and con then table.insert(S.RemoteConnections,con) end
+
+function S.decisionFingerprint(decision)
+    if type(decision) ~= "table" then
+        return "none"
+    end
+
+    return table.concat({
+        tostring(decision.EventId),
+        tostring(decision.Choice),
+        tostring(decision.Score),
+        tostring(decision.Chance),
+        tostring(decision.Worst),
+        tostring(decision.Expected),
+        tostring(decision.Best),
+        tostring(decision.Cost),
+        tostring(decision.Phase)
+    }, "|")
+end
+
+function S.captureDecision()
+    local decision = S.currentDecision()
+
+    if not decision then
+        return
+    end
+
+    local fp = S.decisionFingerprint(decision)
+
+    if fp == S.LastDecisionFP then
+        return
+    end
+
+    S.LastDecisionFP = fp
+
+    if decision.EventId then
+        S.EventCounts[tostring(decision.EventId)] =
+            (S.EventCounts[tostring(decision.EventId)] or 0) + 1
+    end
+
+    if decision.Choice then
+        S.ChoiceCounts[tostring(decision.Choice)] =
+            (S.ChoiceCounts[tostring(decision.Choice)] or 0) + 1
+    end
+
+    S.log(
+        "DECISION",
+        "event="
+            .. tostring(decision.EventId or "-")
+            .. " | title="
+            .. tostring(decision.EventTitle or "-")
+            .. " | choice="
+            .. tostring(decision.Choice or "-")
+            .. " | phase="
+            .. tostring(decision.Phase or "-")
+            .. " | chance="
+            .. tostring(decision.Chance or "-")
+            .. " | rating(w/e/b)="
+            .. tostring(decision.Worst or "-")
+            .. "/"
+            .. tostring(decision.Expected or "-")
+            .. "/"
+            .. tostring(decision.Best or "-")
+            .. " | score="
+            .. tostring(decision.Score or "-")
+            .. " | cost="
+            .. tostring(decision.Cost or 0)
+    )
+end
+
+function S.captureEvent()
+    local event = S.currentVisibleEvent()
+    local fp = event and tostring(event.id) or "none"
+
+    if fp == S.LastEventFP then
+        return
+    end
+
+    S.LastEventFP = fp
+
+    if event then
+        S.log(
+            "EVENT",
+            "id="
+                .. tostring(event.id)
+                .. " | title="
+                .. tostring(event.title)
+        )
     end
 end
 
-function S.stateFP(t)
-    if type(t)~="table" then return "none" end
-    local out = {}
-    for _, k in ipairs({"age","season","seasons","position","ovr","overall","peak","pot","potential","potMin","potMax","money","rep","reputation","forme","moral","discipline","tir","passe","dribble","vitesse","puissance","defense","mental","injury","injured","suspend","playstyle"}) do
-        table.insert(out,k.."="..tostring(rawget(t,k)))
+function S.capturePolicy()
+    local br = S.optimizer()
+
+    if not br then
+        return
     end
-    return table.concat(out,";")
-end
-function S.logState(reason)
-    local t, score, all = S.bestState()
-    if t then S.log("STATE_"..tostring(reason),"score="..score.." :: "..S.serialize(S.shallowState(t))) else S.log("STATE_"..tostring(reason),"none") end
-    if all and #all>1 then
-        local alt = {}
-        for i=2,math.min(#all,5) do table.insert(alt,"score="..all[i].Score..":"..S.serialize(S.shallowState(all[i].Table))) end
-        if #alt>0 then S.log("STATE_ALTS",table.concat(alt," || ")) end
+
+    local action = tostring(br.LastPolicyAction or "-")
+    local at = tostring(br.LastPolicyAt or 0)
+    local fp = action .. "|" .. at
+
+    if fp == S.LastPolicyFP then
+        return
+    end
+
+    S.LastPolicyFP = fp
+
+    if action ~= "-" then
+        S.PolicyCounts[action] =
+            (S.PolicyCounts[action] or 0) + 1
+
+        S.log(
+            "POLICY",
+            action
+                .. " | phase="
+                .. tostring(
+                    type(br.careerPhase) == "function"
+                        and br.careerPhase()
+                        or "-"
+                )
+        )
     end
 end
 
-S.logState("INITIAL")
+--------------------------------------------------
+-- SUMMARY
+--------------------------------------------------
+
+function S.sortedCounts(map)
+    local rows = {}
+
+    for key, value in pairs(map) do
+        table.insert(rows, {
+            Key = key,
+            Value = value
+        })
+    end
+
+    table.sort(rows, function(a, b)
+        if a.Value ~= b.Value then
+            return a.Value > b.Value
+        end
+
+        return tostring(a.Key) < tostring(b.Key)
+    end)
+
+    return rows
+end
+
+function S.makeSummary()
+    local out = {
+        "============================================================",
+        "GOAT SCAN LITE SUMMARY",
+        "============================================================",
+        "Started UTC: " .. os.date("!%Y-%m-%dT%H:%M:%SZ", S.StartedAt),
+        "Finished UTC: " .. S.ts(),
+        "PlaceId: " .. tostring(game.PlaceId),
+        "GameId: " .. tostring(game.GameId),
+        "",
+        "Start age: " .. tostring(S.StartAge or "-"),
+        "End age: " .. tostring(S.EndAge or "-"),
+        "Start overall: " .. tostring(S.StartOverall or "-"),
+        "End overall: " .. tostring(S.EndOverall or "-"),
+        "Max observed overall: " .. tostring(S.MaxOverall or "-"),
+        "Max observed peak: " .. tostring(S.MaxPeak or "-"),
+        "",
+        "EVENT COUNTS"
+    }
+
+    for _, row in ipairs(S.sortedCounts(S.EventCounts)) do
+        table.insert(
+            out,
+            tostring(row.Value) .. "x | " .. tostring(row.Key)
+        )
+    end
+
+    table.insert(out, "")
+    table.insert(out, "CHOICE COUNTS")
+
+    for _, row in ipairs(S.sortedCounts(S.ChoiceCounts)) do
+        table.insert(
+            out,
+            tostring(row.Value) .. "x | " .. tostring(row.Key)
+        )
+    end
+
+    table.insert(out, "")
+    table.insert(out, "POLICY ACTIONS")
+
+    for _, row in ipairs(S.sortedCounts(S.PolicyCounts)) do
+        table.insert(
+            out,
+            tostring(row.Value) .. "x | " .. tostring(row.Key)
+        )
+    end
+
+    return table.concat(out, "\n")
+end
+
+--------------------------------------------------
+-- MAIN LOOP
+--------------------------------------------------
+
+S.log(
+    "START",
+    "V2 LITE | polling="
+        .. tostring(S.PollEvery)
+        .. "s | heavy scans disabled"
+)
+
+S.captureState("INITIAL")
+S.captureEvent()
+S.captureDecision()
+S.capturePolicy()
+S.flush()
 
 task.spawn(function()
     while S.Alive do
-        task.wait(0.45)
-        local state = S.bestState()
-        local fp = S.stateFP(state)
-        if fp ~= S.LastStateFP then S.LastStateFP=fp; S.logState("CHANGE") end
+        task.wait(S.PollEvery)
 
-        local ev = S.currentEvent()
-        local choices = S.visibleChoices()
-        local cp = {}
-        for _, c in ipairs(choices) do table.insert(cp,c.Path.."{"..table.concat(c.Texts," / ").."}") end
-        table.sort(cp)
-        local efp = (ev and tostring(ev.id) or "none") .. "::" .. table.concat(cp,"||")
-        if efp ~= S.LastEventFP then
-            S.LastEventFP = efp
-            if ev then
-                S.log("EVENT","id="..tostring(ev.id).." title="..tostring(ev.title).." choices="..S.serialize(choices).." data="..S.serialize(ev))
-            elseif #choices>0 then
-                S.log("CHOICES_NO_TITLE",S.serialize(choices))
-            end
+        local state = S.currentState()
+        local stateFP = S.stateFingerprint(state)
+
+        if stateFP ~= S.LastStateFP then
+            S.LastStateFP = stateFP
+            S.captureState("CHANGE")
         end
 
-        local rows = S.uiSnapshot()
-        local ufp = table.concat(rows,"\n")
-        if ufp ~= S.LastUiFP then
-            S.LastUiFP = ufp
-            local preview = #ufp>30000 and (ufp:sub(1,30000).."\n<UI truncated>") or ufp
-            S.log("UI_CHANGE",preview)
-        end
+        S.captureEvent()
+        S.captureDecision()
+        S.capturePolicy()
 
-        if os.clock()-S.LastFlush>4 then S.flush() end
+        if os.clock() - S.LastFlush >= S.FlushEvery then
+            S.flush()
+        end
     end
 end)
 
+--------------------------------------------------
+-- CONTROL
+--------------------------------------------------
+
 function S:Snapshot(label)
-    self.log("MANUAL",label or "snapshot")
-    self.logState("MANUAL")
-    local ev = self.currentEvent()
-    if ev then self.log("MANUAL_EVENT",self.serialize(ev)) end
+    self.log(
+        "MANUAL",
+        tostring(label or "snapshot")
+    )
+
+    self.captureState("MANUAL")
+    self.captureEvent()
+    self.captureDecision()
+    self.capturePolicy()
     self.flush()
 end
 
 function S:Stop()
-    self.Alive=false
-    for _, c in ipairs(self.RemoteConnections) do pcall(function() c:Disconnect() end) end
+    if not self.Alive then
+        return
+    end
+
+    self.Alive = false
+
+    self.captureState("FINAL")
+    self.captureEvent()
+    self.captureDecision()
+    self.capturePolicy()
     self.flush()
-    warn("[GOATScanner] STOPPED - upload GOATScan_FullDump.txt + GOATScan_LiveTelemetry.txt")
+
+    self.write(
+        "GOATScan_LiteSummary.txt",
+        self.makeSummary()
+    )
+
+    warn("[GOATScanner] V2 LITE STOPPED")
+    warn("[GOATScanner] Upload:")
+    warn("GOATScan_LiteTelemetry.txt")
+    warn("GOATScan_LiteSummary.txt")
 end
 
-task.delay(90*60,function() if S.Alive then S:Stop() end end)
+task.delay(90 * 60, function()
+    if S.Alive then
+        S:Stop()
+    end
+end)
 
-warn("[GOATScanner] V1 READY")
-warn("[GOATScanner] Run V6 and play a full career. When finished:")
+warn("[GOATScanner] V2 LITE READY")
+warn("[GOATScanner] Recommended order: run V6 first, then this scanner.")
+warn("[GOATScanner] At career end:")
 warn("getgenv().GOATResearchScanner:Stop()")
-warn("Then upload GOATScan_FullDump.txt + GOATScan_LiveTelemetry.txt")
