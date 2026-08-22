@@ -876,3 +876,4 @@ warn("[GOATScanner] V2 LITE READY")
 warn("[GOATScanner] Recommended order: run V6 first, then this scanner.")
 warn("[GOATScanner] At career end:")
 warn("getgenv().GOATResearchScanner:Stop()")
+ 
