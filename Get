@@ -1,136 +1,105 @@
-warn("[AutoDeep] PC V2 START")
+warn("[AutoTrace] PC V3 START")
 
--- AUTOMATION DEEP MAPPER - PC V2
--- Read-only follow-up scanner for the automation project.
+-- AUTOMATION TARGETED TRACE - PC V3
+-- Read-only diagnostic for the automation project.
 --
--- Why V2:
--- The first scan found the important controllers/remotes/UI, but Delta's
--- decompiler panicked on most game scripts. This mapper therefore extracts:
---   1) returned values from relevant ReplicatedStorage modules via require()
---   2) function constants/upvalues/protos inside those returned module tables
---   3) callback metadata/upvalues from relevant GUI buttons via getconnections()
---   4) getgc functions that DIRECTLY reference one of the game's remotes
---   5) DataTemplate / SettingsDataTemplate / Config / Formulas structures
+-- Fixes the V2 blind spot: the interesting controllers are ModuleScripts,
+-- not LocalScripts. V3 requires/introspects those modules and passively logs
+-- the game's OWN outbound remote calls while you perform normal actions.
 --
--- It does NOT FireServer / InvokeServer / click buttons / buy upgrades.
+-- It DOES NOT call FireServer/InvokeServer itself and does not buy/reset.
 --
--- Output:
---   AUTO_DEEP_Summary.txt
---   AUTO_DEEP_Config.txt
---   AUTO_DEEP_Connections.txt
---   AUTO_DEEP_RemoteRefs.txt
---   AUTO_DEEP_State.txt
+-- After running this script, manually do each action ONCE:
+--   1) Buy one normal upgrade
+--   2) Use Buy Max once
+--   3) Press a Keycap once
+--   4) Trigger/observe a Star Level gain if possible
+--   5) Prestige once
+--   6) Steel once
+--   7) Space Prestige once
+--   8) Loop once
+--   9) Supernova once if unlocked
+--
+-- Then run:
+--   getgenv().AutomationTrace:Stop()
+--
+-- Upload:
+--   AUTO_TRACE_Summary.txt
+--   AUTO_TRACE_Controllers.txt
+--   AUTO_TRACE_WorldUI.txt
+--   AUTO_TRACE_Remotes.txt
 
-local M = {}
-getgenv().AutomationDeepMapper = M
+local T = {}
+getgenv().AutomationTrace = T
+
+T.Enabled = true
+T.Started = os.clock()
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local playerScripts = player:WaitForChild("PlayerScripts")
 
-M.Files = {
-    Summary = "AUTO_DEEP_Summary.txt",
-    Config = "AUTO_DEEP_Config.txt",
-    Connections = "AUTO_DEEP_Connections.txt",
-    RemoteRefs = "AUTO_DEEP_RemoteRefs.txt",
-    State = "AUTO_DEEP_State.txt",
+T.Files = {
+    Summary = "AUTO_TRACE_Summary.txt",
+    Controllers = "AUTO_TRACE_Controllers.txt",
+    WorldUI = "AUTO_TRACE_WorldUI.txt",
+    Remotes = "AUTO_TRACE_Remotes.txt",
 }
 
-M.Keywords = {
-    "point","prestige","power","steel","auto","buyer","keycap",
-    "star","space","dark","loop","upgrade","nova","supernova",
-    "gamma","buy","reset","rebirth","currency","cost","price",
+T.TargetRemoteNames = {
+    GetUpgradeInfo = true,
+    UpdateUpgrade = true,
+    BuyMaxEvent = true,
+    BuyOneEvent = true,
+    KeycapPressed = true,
+    StarExperienceGain = true,
+    LoopEvent = true,
+    SupernovaEvent = true,
+    SupernovaRespecEvent = true,
+    UpdateSetting = true,
+    TeleportEvent = true,
 }
 
-local function norm(v)
-    return string.lower(tostring(v or ""))
-        :gsub("_", " ")
-        :gsub("%s+", " ")
-end
+T.ControllerNames = {
+    ClientMain = true,
+    CurrencyHUDController = true,
+    KeycapController = true,
+    LoopController = true,
+    StarLevelController = true,
+    UpgradeInputController = true,
+    UpgradeVisualsController = true,
+    SettingsController = true,
+    SupernovaBoardController = true,
+    SupernovaChallengeController = true,
+    RevealController = true,
+    TeleportUIController = true,
+}
 
-local function relevant(text)
-    local n = norm(text)
-    for _, word in ipairs(M.Keywords) do
-        if string.find(n, word, 1, true) then
-            return true
-        end
-    end
-    return false
-end
+T.WorldKeywords = {
+    "prestige",
+    "steel",
+    "spaceprestige",
+    "space prestige",
+    "loop",
+    "supernova",
+    "keycap",
+    "upgrade",
+    "darkboard",
+    "starlevel",
+    "star level",
+    "autobuyer",
+    "auto buyer",
+}
 
-local function fullName(inst)
-    local ok, result = pcall(function()
-        return inst:GetFullName()
-    end)
-    return ok and tostring(result) or tostring(inst)
-end
+--------------------------------------------------
+-- HELPERS
+--------------------------------------------------
 
-local function clip(v, n)
-    local s = tostring(v or "")
-    n = n or 4000
-    if #s > n then
-        return s:sub(1, n) .. "...<truncated>"
-    end
-    return s
-end
-
-local function serialize(value, depth, seen)
-    depth = depth or 0
-    seen = seen or {}
-
-    if depth > 10 then
-        return "<max-depth>"
-    end
-
-    local t = typeof(value)
-
-    if t == "nil" then
-        return "nil"
-    elseif t == "string" then
-        return string.format("%q", clip(value, 5000))
-    elseif t == "number" or t == "boolean" then
-        return tostring(value)
-    elseif t == "Instance" then
-        return "<Instance " .. fullName(value) .. ">"
-    elseif t == "function" then
-        local name, source = "", ""
-        if type(debug) == "table" and type(debug.info) == "function" then
-            pcall(function()
-                name = tostring(debug.info(value, "n") or "")
-                source = tostring(debug.info(value, "s") or "")
-            end)
-        end
-        return "<function name=" .. name .. " source=" .. source .. ">"
-    elseif t ~= "table" then
-        return "<" .. t .. " " .. clip(value, 500) .. ">"
-    end
-
-    if seen[value] then
-        return "<cycle>"
-    end
-    seen[value] = true
-
-    local out = {}
-    local count = 0
-
-    for k, v in pairs(value) do
-        count += 1
-        if count > 1200 then
-            table.insert(out, "<table-capped>")
-            break
-        end
-
-        table.insert(
-            out,
-            "[" .. serialize(k, depth + 1, seen) .. "]="
-            .. serialize(v, depth + 1, seen)
-        )
-    end
-
-    seen[value] = nil
-    return "{" .. table.concat(out, ",") .. "}"
+local function now()
+    return os.date("!%Y-%m-%dT%H:%M:%SZ")
 end
 
 local function resetFile(name)
@@ -141,17 +110,22 @@ end
 
 local function append(name, ...)
     local parts = {}
+
     for i = 1, select("#", ...) do
         parts[i] = tostring(select(i, ...))
     end
+
     local line = table.concat(parts, " ") .. "\n"
 
     if type(appendfile) == "function" then
         local ok = pcall(appendfile, name, line)
-        if ok then return end
+        if ok then
+            return
+        end
     end
 
     local old = ""
+
     if type(isfile) == "function"
         and type(readfile) == "function" then
         pcall(function()
@@ -166,46 +140,130 @@ local function append(name, ...)
     end
 end
 
-local function section(file, title)
-    append(file, "")
-    append(file, "============================================================")
-    append(file, title)
-    append(file, "============================================================")
+local function section(name, title)
+    append(name, "")
+    append(name, "============================================================")
+    append(name, title)
+    append(name, "============================================================")
 end
 
-local function stage(name)
-    warn("[AutoDeep] " .. name)
-    append(M.Files.Summary, os.date("!%H:%M:%S"), name)
-    task.wait()
+local function fullName(inst)
+    local ok, result = pcall(function()
+        return inst:GetFullName()
+    end)
+
+    return ok and tostring(result) or tostring(inst)
 end
 
-for _, file in pairs(M.Files) do
+local function clip(value, limit)
+    local s = tostring(value or "")
+    limit = limit or 5000
+
+    if #s > limit then
+        return s:sub(1, limit) .. "...<truncated>"
+    end
+
+    return s
+end
+
+local function serialize(value, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+
+    if depth > 8 then
+        return "<max-depth>"
+    end
+
+    local t = typeof(value)
+
+    if t == "nil" then
+        return "nil"
+    elseif t == "string" then
+        return string.format("%q", clip(value, 6000))
+    elseif t == "number" or t == "boolean" then
+        return tostring(value)
+    elseif t == "Instance" then
+        return "<Instance " .. fullName(value) .. ">"
+    elseif t == "function" then
+        local n, s = "", ""
+
+        if type(debug) == "table"
+            and type(debug.info) == "function" then
+            pcall(function()
+                n = tostring(debug.info(value, "n") or "")
+                s = tostring(debug.info(value, "s") or "")
+            end)
+        end
+
+        return "<function name=" .. n .. " source=" .. s .. ">"
+    elseif t ~= "table" then
+        return "<" .. t .. " " .. clip(value, 800) .. ">"
+    end
+
+    if seen[value] then
+        return "<cycle>"
+    end
+
+    seen[value] = true
+
+    local out = {}
+    local count = 0
+
+    for k, v in pairs(value) do
+        count += 1
+
+        if count > 800 then
+            table.insert(out, "<table-capped>")
+            break
+        end
+
+        table.insert(
+            out,
+            "["
+                .. serialize(k, depth + 1, seen)
+                .. "]="
+                .. serialize(v, depth + 1, seen)
+        )
+    end
+
+    seen[value] = nil
+
+    return "{" .. table.concat(out, ",") .. "}"
+end
+
+local function interestingName(value)
+    local s = string.lower(tostring(value or ""))
+
+    for _, keyword in ipairs(T.WorldKeywords) do
+        if string.find(s, keyword, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+for _, file in pairs(T.Files) do
     resetFile(file)
 end
 
-section(M.Files.Summary, "AUTOMATION DEEP MAPPER - PC V2")
-append(M.Files.Summary, "PlaceId:", game.PlaceId)
-append(M.Files.Summary, "GameId:", game.GameId)
+section(T.Files.Summary, "AUTOMATION TARGETED TRACE - PC V3")
+append(T.Files.Summary, "Started UTC:", now())
+append(T.Files.Summary, "PlaceId:", game.PlaceId)
+append(T.Files.Summary, "GameId:", game.GameId)
 
 local executor = "Unknown"
+
 pcall(function()
     if type(identifyexecutor) == "function" then
         executor = tostring(select(1, identifyexecutor()) or "Unknown")
     end
 end)
-append(M.Files.Summary, "Executor:", executor)
 
-section(M.Files.Summary, "CAPABILITIES")
-for _, name in ipairs({
-    "getconnections","getgc","getconstants","getupvalues","getprotos",
-    "getsenv","getscriptclosure","getscriptfunction","getscriptbytecode",
-    "decompile","getloadedmodules"
-}) do
-    append(M.Files.Summary, name, "=", type(getgenv()[name]))
-end
+append(T.Files.Summary, "Executor:", executor)
 
 --------------------------------------------------
--- FUNCTION INTROSPECTION
+-- FUNCTION DUMP
 --------------------------------------------------
 
 local function dumpFunction(file, label, fn)
@@ -215,7 +273,9 @@ local function dumpFunction(file, label, fn)
 
     local name, source, line = "", "", ""
 
-    if type(debug) == "table" and type(debug.info) == "function" then
+    if type(debug) == "table"
+        and type(debug.info) == "function" then
+
         pcall(function()
             name = tostring(debug.info(fn, "n") or "")
             source = tostring(debug.info(fn, "s") or "")
@@ -233,50 +293,54 @@ local function dumpFunction(file, label, fn)
     )
 
     if type(getconstants) == "function" then
-        local ok, constants = pcall(getconstants, fn)
+        local ok, data = pcall(getconstants, fn)
+
         if ok then
             append(
                 file,
                 "CONSTANTS=",
-                clip(serialize(constants), 25000)
+                clip(serialize(data), 30000)
             )
         end
     end
 
     if type(getupvalues) == "function" then
-        local ok, upvalues = pcall(getupvalues, fn)
+        local ok, data = pcall(getupvalues, fn)
+
         if ok then
             append(
                 file,
                 "UPVALUES=",
-                clip(serialize(upvalues), 50000)
+                clip(serialize(data), 70000)
             )
         end
     end
 
     if type(getprotos) == "function" then
         local ok, protos = pcall(getprotos, fn)
+
         if ok and type(protos) == "table" then
             local meta = {}
 
             for i, proto in ipairs(protos) do
-                if i > 50 then
+                if i > 80 then
                     break
                 end
 
-                local pName, pSource = "", ""
+                local pn, ps = "", ""
+
                 if type(debug) == "table"
                     and type(debug.info) == "function" then
                     pcall(function()
-                        pName = tostring(debug.info(proto, "n") or "")
-                        pSource = tostring(debug.info(proto, "s") or "")
+                        pn = tostring(debug.info(proto, "n") or "")
+                        ps = tostring(debug.info(proto, "s") or "")
                     end)
                 end
 
                 table.insert(meta, {
                     index = i,
-                    name = pName,
-                    source = pSource,
+                    name = pn,
+                    source = ps,
                 })
             end
 
@@ -301,214 +365,158 @@ local function walkFunctions(file, label, value, depth, seen)
     if type(value) ~= "table" or seen[value] then
         return
     end
+
     seen[value] = true
 
     for k, v in pairs(value) do
-        local child = label .. "." .. tostring(k)
+        local childLabel = label .. "." .. tostring(k)
+
         if type(v) == "function" then
-            dumpFunction(file, child, v)
+            dumpFunction(file, childLabel, v)
         elseif type(v) == "table" then
-            walkFunctions(file, child, v, depth + 1, seen)
-        end
-    end
-end
-
---------------------------------------------------
--- RELEVANT MODULES
---------------------------------------------------
-
-stage("1/5 Requiring relevant config/data modules")
-
-local wantedNames = {
-    ["BuyMaxCategories"] = true,
-    ["Upgrades"] = true,
-    ["Resets"] = true,
-    ["Stats"] = true,
-    ["GameConfig"] = true,
-    ["Shop"] = true,
-    ["Reveals"] = true,
-    ["Achievements"] = true,
-    ["Challenges"] = true,
-    ["QuestRewards"] = true,
-    ["Quests"] = true,
-    ["Portals"] = true,
-    ["Formulas"] = true,
-    ["Remotes"] = true,
-    ["DataTemplate"] = true,
-    ["SettingsDataTemplate"] = true,
-}
-
-local modules = {}
-
-for _, object in ipairs(ReplicatedStorage:GetDescendants()) do
-    if object:IsA("ModuleScript") then
-        if wantedNames[object.Name] or relevant(fullName(object)) then
-            table.insert(modules, object)
-        end
-    end
-end
-
-table.sort(modules, function(a, b)
-    return fullName(a) < fullName(b)
-end)
-
-section(M.Files.Config, "REQUIRED MODULE RETURNS")
-
-local requiredCount = 0
-
-for index, module in ipairs(modules) do
-    append(M.Files.Config, "")
-    append(M.Files.Config, "------------------------------------------------------------")
-    append(M.Files.Config, "MODULE", index, fullName(module))
-    append(M.Files.Config, "------------------------------------------------------------")
-
-    local ok, result = pcall(require, module)
-
-    if ok then
-        requiredCount += 1
-        append(
-            M.Files.Config,
-            "RETURN=",
-            clip(serialize(result), 150000)
-        )
-
-        walkFunctions(
-            M.Files.Config,
-            fullName(module),
-            result,
-            0,
-            {}
-        )
-    else
-        append(M.Files.Config, "REQUIRE_ERROR=", tostring(result))
-    end
-
-    task.wait()
-end
-
-append(M.Files.Summary, "Required modules:", requiredCount, "/", #modules)
-
---------------------------------------------------
--- STATE TEMPLATES / LIVE VALUE OBJECTS
---------------------------------------------------
-
-stage("2/5 State/templates/value objects")
-
-section(M.Files.State, "PLAYER + REPLICATED STATE CANDIDATES")
-
-local stateCount = 0
-local stateRoots = {
-    player,
-    ReplicatedStorage,
-}
-
-for _, root in ipairs(stateRoots) do
-    local objects = {root}
-    for _, object in ipairs(root:GetDescendants()) do
-        table.insert(objects, object)
-    end
-
-    for index, object in ipairs(objects) do
-        local path = fullName(object)
-
-        local valueText = ""
-        if object:IsA("ValueBase") then
-            local ok, value = pcall(function()
-                return object.Value
-            end)
-            if ok then
-                valueText = tostring(value)
-            end
-        end
-
-        local attrs = {}
-        pcall(function()
-            attrs = object:GetAttributes()
-        end)
-
-        local blob =
-            path
-            .. " "
-            .. object.Name
-            .. " "
-            .. valueText
-            .. " "
-            .. serialize(attrs)
-
-        if relevant(blob) then
-            stateCount += 1
-            append(
-                M.Files.State,
-                stateCount,
-                object.ClassName,
-                path,
-                "VALUE=" .. valueText,
-                "ATTRS=" .. clip(serialize(attrs), 10000)
+            walkFunctions(
+                file,
+                childLabel,
+                v,
+                depth + 1,
+                seen
             )
         end
+    end
+end
 
-        if index % 1000 == 0 then
+--------------------------------------------------
+-- CONTROLLER MODULES
+--------------------------------------------------
+
+section(T.Files.Controllers, "TARGET CONTROLLER MODULES")
+
+local controllersFolder = playerScripts:FindFirstChild("Controllers")
+local controllerCount = 0
+
+if controllersFolder then
+    for _, module in ipairs(controllersFolder:GetChildren()) do
+        if module:IsA("ModuleScript")
+            and T.ControllerNames[module.Name] then
+
+            controllerCount += 1
+
+            append(T.Files.Controllers, "")
+            append(
+                T.Files.Controllers,
+                "------------------------------------------------------------"
+            )
+            append(
+                T.Files.Controllers,
+                "CONTROLLER",
+                controllerCount,
+                fullName(module)
+            )
+            append(
+                T.Files.Controllers,
+                "------------------------------------------------------------"
+            )
+
+            local ok, returned = pcall(require, module)
+
+            if ok then
+                append(
+                    T.Files.Controllers,
+                    "RETURN=",
+                    clip(serialize(returned), 90000)
+                )
+
+                walkFunctions(
+                    T.Files.Controllers,
+                    fullName(module) .. ".RETURN",
+                    returned,
+                    0,
+                    {}
+                )
+            else
+                append(
+                    T.Files.Controllers,
+                    "REQUIRE_ERROR=",
+                    tostring(returned)
+                )
+            end
+
+            for _, getterName in ipairs({
+                "getscriptclosure",
+                "getscriptfunction",
+            }) do
+                local getter = getgenv()[getterName]
+
+                if type(getter) == "function" then
+                    local okGetter, fn = pcall(getter, module)
+
+                    if okGetter and type(fn) == "function" then
+                        dumpFunction(
+                            T.Files.Controllers,
+                            fullName(module) .. "." .. getterName,
+                            fn
+                        )
+                    end
+                end
+            end
+
             task.wait()
         end
     end
 end
 
-append(M.Files.Summary, "State candidates:", stateCount)
+append(T.Files.Summary, "Controllers inspected:", controllerCount)
 
 --------------------------------------------------
--- RELEVANT UI CALLBACKS
+-- WORLD UI / CLICKABLES
 --------------------------------------------------
 
-stage("3/5 Relevant GUI callbacks")
+section(T.Files.WorldUI, "RELEVANT WORKSPACE INTERACTION OBJECTS")
 
-section(M.Files.Connections, "RELEVANT GUI BUTTON CALLBACKS")
+local worldObjects = 0
+local exposedConnections = 0
 
-local buttonCount = 0
-local connectionCount = 0
+for index, object in ipairs(Workspace:GetDescendants()) do
+    local blob = fullName(object) .. " " .. object.Name
 
-if type(getconnections) == "function" then
-    for index, object in ipairs(playerGui:GetDescendants()) do
-        if object:IsA("GuiButton") then
-            local textBlob = fullName(object) .. " " .. object.Name
+    if interestingName(blob) then
+        local supported = object:IsA("GuiButton")
+            or object:IsA("ClickDetector")
+            or object:IsA("ProximityPrompt")
+            or object:IsA("BasePart")
 
-            for _, child in ipairs(object:GetDescendants()) do
-                if child:IsA("TextLabel")
-                    or child:IsA("TextButton")
-                    or child:IsA("TextBox") then
-                    textBlob = textBlob .. " " .. tostring(child.Text)
+        if supported then
+            worldObjects += 1
+
+            append(T.Files.WorldUI, "")
+            append(
+                T.Files.WorldUI,
+                "OBJECT",
+                worldObjects,
+                object.ClassName,
+                fullName(object),
+                "ATTRS=" .. serialize(object:GetAttributes())
+            )
+
+            if type(getconnections) == "function" then
+                local signals = {}
+
+                if object:IsA("GuiButton") then
+                    table.insert(signals, {"Activated", object.Activated})
+
+                    pcall(function()
+                        table.insert(
+                            signals,
+                            {"MouseButton1Click", object.MouseButton1Click}
+                        )
+                    end)
+
+                elseif object:IsA("ClickDetector") then
+                    table.insert(signals, {"MouseClick", object.MouseClick})
+
+                elseif object:IsA("ProximityPrompt") then
+                    table.insert(signals, {"Triggered", object.Triggered})
                 end
-            end
-
-            if object:IsA("TextButton") then
-                textBlob = textBlob .. " " .. tostring(object.Text)
-            end
-
-            if relevant(textBlob) then
-                buttonCount += 1
-
-                append(M.Files.Connections, "")
-                append(
-                    M.Files.Connections,
-                    "BUTTON",
-                    buttonCount,
-                    fullName(object),
-                    "TEXTBLOB=" .. string.format("%q", clip(textBlob, 3000))
-                )
-
-                local signals = {
-                    {"Activated", object.Activated},
-                }
-
-                pcall(function()
-                    table.insert(
-                        signals,
-                        {"MouseButton1Click", object.MouseButton1Click}
-                    )
-                    table.insert(
-                        signals,
-                        {"MouseButton1Down", object.MouseButton1Down}
-                    )
-                end)
 
                 for _, signalInfo in ipairs(signals) do
                     local ok, connections = pcall(
@@ -518,25 +526,24 @@ if type(getconnections) == "function" then
 
                     if ok and type(connections) == "table" then
                         append(
-                            M.Files.Connections,
+                            T.Files.WorldUI,
                             "SIGNAL",
                             signalInfo[1],
                             "count=" .. tostring(#connections)
                         )
 
                         for i, connection in ipairs(connections) do
-                            if i > 30 then break end
-
                             local fn = nil
+
                             pcall(function()
                                 fn = connection.Function
                             end)
 
-                            connectionCount += 1
-
                             if type(fn) == "function" then
+                                exposedConnections += 1
+
                                 dumpFunction(
-                                    M.Files.Connections,
+                                    T.Files.WorldUI,
                                     fullName(object)
                                         .. "."
                                         .. signalInfo[1]
@@ -544,229 +551,173 @@ if type(getconnections) == "function" then
                                         .. tostring(i),
                                     fn
                                 )
-                            else
-                                append(
-                                    M.Files.Connections,
-                                    "CONNECTION",
-                                    i,
-                                    "no exposed Function"
-                                )
                             end
                         end
                     end
                 end
             end
         end
+    end
 
-        if index % 300 == 0 then
-            task.wait()
+    if index % 800 == 0 then
+        task.wait()
+    end
+end
+
+append(T.Files.Summary, "Relevant world interaction objects:", worldObjects)
+append(T.Files.Summary, "Exposed world callbacks:", exposedConnections)
+
+--------------------------------------------------
+-- PASSIVE REMOTE TRACE
+--------------------------------------------------
+
+section(T.Files.Remotes, "PASSIVE OUTBOUND REMOTE TRACE")
+append(
+    T.Files.Remotes,
+    "Only calls made by the GAME while tracing are logged."
+)
+
+local remoteFolder = ReplicatedStorage:FindFirstChild("Remotes")
+local targetInstances = {}
+
+if remoteFolder then
+    for _, object in ipairs(remoteFolder:GetChildren()) do
+        if T.TargetRemoteNames[object.Name]
+            and (
+                object:IsA("RemoteEvent")
+                or object:IsA("RemoteFunction")
+            ) then
+
+            targetInstances[object] = true
+
+            append(
+                T.Files.Remotes,
+                "WATCH",
+                object.ClassName,
+                fullName(object)
+            )
         end
     end
 end
 
-append(M.Files.Summary, "Relevant buttons:", buttonCount)
-append(M.Files.Summary, "Connection functions inspected:", connectionCount)
+local function callingScriptText()
+    if type(getcallingscript) == "function" then
+        local ok, scriptInst = pcall(getcallingscript)
 
---------------------------------------------------
--- SCRIPT ENVIRONMENTS / CLOSURES
---------------------------------------------------
-
-stage("4/5 Controller environments/closures")
-
-section(M.Files.Connections, "RELEVANT CONTROLLER ENVIRONMENTS")
-
-local controllerCount = 0
-
-for _, object in ipairs(player:FindFirstChild("PlayerScripts")
-        and player.PlayerScripts:GetDescendants()
-        or {}) do
-
-    if object:IsA("LocalScript")
-        and relevant(fullName(object)) then
-
-        controllerCount += 1
-
-        append(M.Files.Connections, "")
-        append(
-            M.Files.Connections,
-            "CONTROLLER",
-            controllerCount,
-            fullName(object)
-        )
-
-        if type(getsenv) == "function" then
-            local ok, env = pcall(getsenv, object)
-            if ok then
-                append(
-                    M.Files.Connections,
-                    "ENV=",
-                    clip(serialize(env), 60000)
-                )
-                walkFunctions(
-                    M.Files.Connections,
-                    fullName(object) .. ".ENV",
-                    env,
-                    0,
-                    {}
-                )
-            else
-                append(
-                    M.Files.Connections,
-                    "getsenv error=",
-                    tostring(env)
-                )
-            end
-        end
-
-        for _, getterName in ipairs({
-            "getscriptclosure",
-            "getscriptfunction",
-        }) do
-            local getter = getgenv()[getterName]
-
-            if type(getter) == "function" then
-                local ok, fn = pcall(getter, object)
-
-                if ok and type(fn) == "function" then
-                    dumpFunction(
-                        M.Files.Connections,
-                        fullName(object) .. "." .. getterName,
-                        fn
-                    )
-                end
-            end
+        if ok and scriptInst then
+            return fullName(scriptInst)
         end
     end
+
+    return "unknown"
 end
 
-append(M.Files.Summary, "Relevant controllers:", controllerCount)
-
---------------------------------------------------
--- DIRECT REMOTE REFERENCES IN GC FUNCTIONS
---------------------------------------------------
-
-stage("5/5 Mapping direct remote references")
-
-section(M.Files.RemoteRefs, "REMOTE REFERENCES FROM GC FUNCTIONS")
-
-local remotes = {}
-local remoteByInstance = {}
-
-for _, object in ipairs(ReplicatedStorage:GetDescendants()) do
-    if object:IsA("RemoteEvent")
-        or object:IsA("RemoteFunction")
-        or object.ClassName == "UnreliableRemoteEvent" then
-
-        table.insert(remotes, object)
-        remoteByInstance[object] = true
-    end
-end
-
-for i, remote in ipairs(remotes) do
+local function logRemote(remote, method, args)
     append(
-        M.Files.RemoteRefs,
-        "REMOTE",
-        i,
-        remote.ClassName,
-        fullName(remote)
+        T.Files.Remotes,
+        "",
+        "[" .. now() .. "]",
+        method,
+        fullName(remote),
+        "caller=" .. callingScriptText(),
+        "argc=" .. tostring(args.n or #args)
+    )
+
+    for i = 1, (args.n or #args) do
+        append(
+            T.Files.Remotes,
+            "ARG",
+            i,
+            "=",
+            clip(serialize(args[i]), 30000)
+        )
+    end
+end
+
+T.HookInstalled = false
+
+if type(hookmetamethod) == "function"
+    and type(getnamecallmethod) == "function"
+    and type(newcclosure) == "function" then
+
+    local oldNamecall
+
+    oldNamecall = hookmetamethod(
+        game,
+        "__namecall",
+        newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+
+            if T.Enabled
+                and targetInstances[self]
+                and (
+                    method == "FireServer"
+                    or method == "InvokeServer"
+                ) then
+
+                local args = table.pack(...)
+
+                pcall(function()
+                    logRemote(self, method, args)
+                end)
+            end
+
+            return oldNamecall(self, ...)
+        end)
+    )
+
+    T.HookInstalled = true
+
+    append(
+        T.Files.Summary,
+        "Passive namecall trace:",
+        "installed"
+    )
+else
+    append(
+        T.Files.Summary,
+        "Passive namecall trace:",
+        "UNAVAILABLE"
     )
 end
 
-local function tableContainsRemote(tbl, depth, seen)
-    depth = depth or 0
-    seen = seen or {}
+--------------------------------------------------
+-- CONTROL
+--------------------------------------------------
 
-    if depth > 3 or type(tbl) ~= "table" or seen[tbl] then
-        return nil
-    end
-    seen[tbl] = true
-
-    for k, v in pairs(tbl) do
-        if typeof(v) == "Instance" and remoteByInstance[v] then
-            return v
-        elseif type(v) == "table" then
-            local found = tableContainsRemote(
-                v,
-                depth + 1,
-                seen
-            )
-            if found then
-                return found
-            end
-        end
-
-        if typeof(k) == "Instance" and remoteByInstance[k] then
-            return k
-        end
-    end
-
-    return nil
+function T:Mark(label)
+    append(
+        self.Files.Remotes,
+        "",
+        "[" .. now() .. "] MARK",
+        tostring(label or "manual")
+    )
 end
 
-local mapped = 0
-
-if type(getgc) == "function" then
-    local ok, objects = pcall(getgc, true)
-
-    if ok and type(objects) == "table" then
-        for index, object in ipairs(objects) do
-            if type(object) == "function"
-                and type(getupvalues) == "function" then
-
-                local okUp, upvalues = pcall(
-                    getupvalues,
-                    object
-                )
-
-                if okUp and type(upvalues) == "table" then
-                    local foundRemote = nil
-
-                    for _, value in pairs(upvalues) do
-                        if typeof(value) == "Instance"
-                            and remoteByInstance[value] then
-                            foundRemote = value
-                            break
-                        elseif type(value) == "table" then
-                            foundRemote = tableContainsRemote(
-                                value,
-                                0,
-                                {}
-                            )
-                            if foundRemote then break end
-                        end
-                    end
-
-                    if foundRemote then
-                        mapped += 1
-                        append(M.Files.RemoteRefs, "")
-                        append(
-                            M.Files.RemoteRefs,
-                            "REMOTE_REF_FUNCTION",
-                            mapped,
-                            "remote=" .. fullName(foundRemote)
-                        )
-
-                        dumpFunction(
-                            M.Files.RemoteRefs,
-                            "gc#" .. tostring(index),
-                            object
-                        )
-                    end
-                end
-            end
-
-            if index % 350 == 0 then
-                task.wait()
-            end
-        end
+function T:Stop()
+    if not self.Enabled then
+        return
     end
+
+    self.Enabled = false
+
+    section(self.Files.Summary, "FINAL")
+    append(self.Files.Summary, "Stopped UTC:", now())
+    append(
+        self.Files.Summary,
+        "Runtime seconds:",
+        string.format("%.2f", os.clock() - self.Started)
+    )
+    append(
+        self.Files.Summary,
+        "Hook installed:",
+        tostring(self.HookInstalled)
+    )
+
+    warn("[AutoTrace] STOPPED")
+    warn("[AutoTrace] Upload AUTO_TRACE_*.txt files.")
 end
 
-append(M.Files.Summary, "GC functions with direct remote refs:", mapped)
-
-section(M.Files.Summary, "DONE")
-append(M.Files.Summary, "Upload all AUTO_DEEP_*.txt files.")
-append(M.Files.Summary, "Finished UTC:", os.date("!%Y-%m-%dT%H:%M:%SZ"))
-
-warn("[AutoDeep] PC V2 COMPLETE")
-warn("[AutoDeep] Upload AUTO_DEEP_*.txt files.")
+warn("[AutoTrace] PC V3 READY")
+warn("[AutoTrace] Perform each normal buy/reset action once.")
+warn("[AutoTrace] Then run: getgenv().AutomationTrace:Stop()")
