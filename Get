@@ -1,78 +1,63 @@
-warn("[AutoResearch] PC Scanner V1 START")
+warn("[AutoDeep] PC V2 START")
 
--- AUTOMATION RESEARCH SCANNER - PC V1
--- Read-only client scanner for your own Roblox game.
--- Searches client-visible scripts/modules/tables/UI/remotes for:
--- Points, Prestige, Power, Steel, Auto-buyers, Keycaps, Star Levels,
--- Space Points, Space Prestige, Dark Matter, Darkboard, Loops, Upgrades.
+-- AUTOMATION DEEP MAPPER - PC V2
+-- Read-only follow-up scanner for the automation project.
 --
--- It DOES NOT fire remotes or modify game state.
+-- Why V2:
+-- The first scan found the important controllers/remotes/UI, but Delta's
+-- decompiler panicked on most game scripts. This mapper therefore extracts:
+--   1) returned values from relevant ReplicatedStorage modules via require()
+--   2) function constants/upvalues/protos inside those returned module tables
+--   3) callback metadata/upvalues from relevant GUI buttons via getconnections()
+--   4) getgc functions that DIRECTLY reference one of the game's remotes
+--   5) DataTemplate / SettingsDataTemplate / Config / Formulas structures
+--
+-- It does NOT FireServer / InvokeServer / click buttons / buy upgrades.
 --
 -- Output:
---   AUTO_SCAN_Summary.txt
---   AUTO_SCAN_Matches.txt
---   AUTO_SCAN_Decompiled.txt
---   AUTO_SCAN_GC.txt
---   AUTO_SCAN_Remotes.txt
---   AUTO_SCAN_UI.txt
+--   AUTO_DEEP_Summary.txt
+--   AUTO_DEEP_Config.txt
+--   AUTO_DEEP_Connections.txt
+--   AUTO_DEEP_RemoteRefs.txt
+--   AUTO_DEEP_State.txt
 
-local S = {}
-getgenv().AutomationResearchScanner = S
+local M = {}
+getgenv().AutomationDeepMapper = M
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local StarterPlayer = game:GetService("StarterPlayer")
-local StarterGui = game:GetService("StarterGui")
-local Lighting = game:GetService("Lighting")
 
-local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-local PlayerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
 
-S.Files = {
-    Summary = "AUTO_SCAN_Summary.txt",
-    Matches = "AUTO_SCAN_Matches.txt",
-    Decompiled = "AUTO_SCAN_Decompiled.txt",
-    GC = "AUTO_SCAN_GC.txt",
-    Remotes = "AUTO_SCAN_Remotes.txt",
-    UI = "AUTO_SCAN_UI.txt",
+M.Files = {
+    Summary = "AUTO_DEEP_Summary.txt",
+    Config = "AUTO_DEEP_Config.txt",
+    Connections = "AUTO_DEEP_Connections.txt",
+    RemoteRefs = "AUTO_DEEP_RemoteRefs.txt",
+    State = "AUTO_DEEP_State.txt",
 }
 
-S.Keywords = {
-    "points","prestige","power","steel",
-    "auto buyer","autobuyer","auto-buy","auto buy",
-    "keycap","keycaps","star level","starlevel",
-    "space point","spacepoint","space prestige","spaceprestige",
-    "dark matter","darkmatter","darkboard",
-    "loop","loops","upgrade","upgrades",
-    "multiplier","rebirth","currency","buy","purchase",
-    "cost","price","requirement","unlock"
+M.Keywords = {
+    "point","prestige","power","steel","auto","buyer","keycap",
+    "star","space","dark","loop","upgrade","nova","supernova",
+    "gamma","buy","reset","rebirth","currency","cost","price",
 }
-
-local function now()
-    return os.date("!%Y-%m-%dT%H:%M:%SZ")
-end
-
-local function clip(v, n)
-    local s = tostring(v or "")
-    n = n or 2000
-    if #s > n then
-        return s:sub(1, n) .. "...<truncated>"
-    end
-    return s
-end
 
 local function norm(v)
     return string.lower(tostring(v or ""))
-        :gsub("’", "'")
-        :gsub("“", '"')
-        :gsub("”", '"')
-        :gsub("–", "-")
-        :gsub("—", "-")
         :gsub("_", " ")
         :gsub("%s+", " ")
-        :gsub("^%s+", "")
-        :gsub("%s+$", "")
+end
+
+local function relevant(text)
+    local n = norm(text)
+    for _, word in ipairs(M.Keywords) do
+        if string.find(n, word, 1, true) then
+            return true
+        end
+    end
+    return false
 end
 
 local function fullName(inst)
@@ -80,6 +65,72 @@ local function fullName(inst)
         return inst:GetFullName()
     end)
     return ok and tostring(result) or tostring(inst)
+end
+
+local function clip(v, n)
+    local s = tostring(v or "")
+    n = n or 4000
+    if #s > n then
+        return s:sub(1, n) .. "...<truncated>"
+    end
+    return s
+end
+
+local function serialize(value, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+
+    if depth > 10 then
+        return "<max-depth>"
+    end
+
+    local t = typeof(value)
+
+    if t == "nil" then
+        return "nil"
+    elseif t == "string" then
+        return string.format("%q", clip(value, 5000))
+    elseif t == "number" or t == "boolean" then
+        return tostring(value)
+    elseif t == "Instance" then
+        return "<Instance " .. fullName(value) .. ">"
+    elseif t == "function" then
+        local name, source = "", ""
+        if type(debug) == "table" and type(debug.info) == "function" then
+            pcall(function()
+                name = tostring(debug.info(value, "n") or "")
+                source = tostring(debug.info(value, "s") or "")
+            end)
+        end
+        return "<function name=" .. name .. " source=" .. source .. ">"
+    elseif t ~= "table" then
+        return "<" .. t .. " " .. clip(value, 500) .. ">"
+    end
+
+    if seen[value] then
+        return "<cycle>"
+    end
+    seen[value] = true
+
+    local out = {}
+    local count = 0
+
+    for k, v in pairs(value) do
+        count += 1
+        if count > 1200 then
+            table.insert(out, "<table-capped>")
+            break
+        end
+
+        table.insert(
+            out,
+            "[" .. serialize(k, depth + 1, seen) .. "]="
+            .. serialize(v, depth + 1, seen)
+        )
+    end
+
+    seen[value] = nil
+    return "{" .. table.concat(out, ",") .. "}"
 end
 
 local function resetFile(name)
@@ -101,7 +152,8 @@ local function append(name, ...)
     end
 
     local old = ""
-    if type(readfile) == "function" and type(isfile) == "function" then
+    if type(isfile) == "function"
+        and type(readfile) == "function" then
         pcall(function()
             if isfile(name) then
                 old = readfile(name)
@@ -114,98 +166,26 @@ local function append(name, ...)
     end
 end
 
-local function section(fileName, title)
-    append(fileName, "")
-    append(fileName, "============================================================")
-    append(fileName, title)
-    append(fileName, "============================================================")
-end
-
-local function serialize(value, depth, seen)
-    depth = depth or 0
-    seen = seen or {}
-
-    if depth > 7 then
-        return "<max-depth>"
-    end
-
-    local t = typeof(value)
-
-    if t == "nil" then
-        return "nil"
-    elseif t == "string" then
-        return string.format("%q", clip(value, 3500))
-    elseif t == "number" or t == "boolean" then
-        return tostring(value)
-    elseif t == "Instance" then
-        return "<Instance " .. fullName(value) .. ">"
-    elseif t ~= "table" then
-        return "<" .. t .. " " .. clip(value, 500) .. ">"
-    end
-
-    if seen[value] then
-        return "<cycle>"
-    end
-    seen[value] = true
-
-    local out = {}
-    local count = 0
-
-    for k, v in pairs(value) do
-        count += 1
-        if count > 450 then
-            table.insert(out, "<table-capped>")
-            break
-        end
-        table.insert(
-            out,
-            "[" .. serialize(k, depth + 1, seen) .. "]="
-            .. serialize(v, depth + 1, seen)
-        )
-    end
-
-    seen[value] = nil
-    return "{" .. table.concat(out, ",") .. "}"
-end
-
-local function keywordHits(text)
-    local n = norm(text)
-    local hits = {}
-
-    for _, keyword in ipairs(S.Keywords) do
-        if string.find(n, keyword, 1, true) then
-            table.insert(hits, keyword)
-        end
-    end
-
-    return hits
-end
-
-local function scoreText(text)
-    local hits = keywordHits(text)
-    return #hits, hits
-end
-
-local function hitsText(hits)
-    return #hits > 0 and table.concat(hits, ", ") or "-"
+local function section(file, title)
+    append(file, "")
+    append(file, "============================================================")
+    append(file, title)
+    append(file, "============================================================")
 end
 
 local function stage(name)
-    warn("[AutoResearch] " .. tostring(name))
-    append(S.Files.Summary, "[" .. now() .. "] STAGE " .. tostring(name))
+    warn("[AutoDeep] " .. name)
+    append(M.Files.Summary, os.date("!%H:%M:%S"), name)
     task.wait()
 end
 
-for _, fileName in pairs(S.Files) do
-    resetFile(fileName)
+for _, file in pairs(M.Files) do
+    resetFile(file)
 end
 
-section(S.Files.Summary, "AUTOMATION RESEARCH SCANNER - PC V1")
-append(S.Files.Summary, "UTC:", now())
-append(S.Files.Summary, "PlaceId:", game.PlaceId)
-append(S.Files.Summary, "GameId:", game.GameId)
-append(S.Files.Summary, "JobId:", game.JobId)
-append(S.Files.Summary, "Player:", LocalPlayer and LocalPlayer.Name or "?")
+section(M.Files.Summary, "AUTOMATION DEEP MAPPER - PC V2")
+append(M.Files.Summary, "PlaceId:", game.PlaceId)
+append(M.Files.Summary, "GameId:", game.GameId)
 
 local executor = "Unknown"
 pcall(function()
@@ -213,362 +193,580 @@ pcall(function()
         executor = tostring(select(1, identifyexecutor()) or "Unknown")
     end
 end)
-append(S.Files.Summary, "Executor:", executor)
+append(M.Files.Summary, "Executor:", executor)
 
-section(S.Files.Summary, "CAPABILITIES")
+section(M.Files.Summary, "CAPABILITIES")
 for _, name in ipairs({
-    "writefile","appendfile","readfile","isfile","getgc",
-    "getloadedmodules","getscripts","getrunningscripts",
-    "decompile","getconstants","getprotos","getupvalues","getconnections"
+    "getconnections","getgc","getconstants","getupvalues","getprotos",
+    "getsenv","getscriptclosure","getscriptfunction","getscriptbytecode",
+    "decompile","getloadedmodules"
 }) do
-    append(S.Files.Summary, name, "=", tostring(type(getgenv()[name])))
+    append(M.Files.Summary, name, "=", type(getgenv()[name]))
 end
 
-stage("1/6 Collecting client-visible scripts")
+--------------------------------------------------
+-- FUNCTION INTROSPECTION
+--------------------------------------------------
 
-local scriptList = {}
-local scriptSeen = {}
-
-local function addScript(inst, source)
-    if typeof(inst) ~= "Instance" or not inst:IsA("LuaSourceContainer") then
+local function dumpFunction(file, label, fn)
+    if type(fn) ~= "function" then
         return
     end
 
-    local path = fullName(inst)
-    if scriptSeen[path] then return end
+    local name, source, line = "", "", ""
 
-    scriptSeen[path] = true
-    table.insert(scriptList, {
-        Instance = inst,
-        Path = path,
-        Source = source,
-    })
-end
-
-local roots = {
-    {ReplicatedStorage, "ReplicatedStorage"},
-    {StarterPlayer, "StarterPlayer"},
-    {StarterGui, "StarterGui"},
-    {Lighting, "Lighting"},
-    {PlayerGui, "PlayerGui"},
-}
-if PlayerScripts then
-    table.insert(roots, {PlayerScripts, "PlayerScripts"})
-end
-
-for _, item in ipairs(roots) do
-    for index, object in ipairs(item[1]:GetDescendants()) do
-        if object:IsA("LuaSourceContainer") then
-            addScript(object, item[2])
-        end
-        if index % 1500 == 0 then task.wait() end
+    if type(debug) == "table" and type(debug.info) == "function" then
+        pcall(function()
+            name = tostring(debug.info(fn, "n") or "")
+            source = tostring(debug.info(fn, "s") or "")
+            line = tostring(debug.info(fn, "l") or "")
+        end)
     end
-end
 
-if type(getloadedmodules) == "function" then
-    local ok, modules = pcall(getloadedmodules)
-    if ok and type(modules) == "table" then
-        for index, inst in ipairs(modules) do
-            addScript(inst, "getloadedmodules")
-            if index % 500 == 0 then task.wait() end
+    append(
+        file,
+        "FUNCTION",
+        label,
+        "name=" .. name,
+        "source=" .. source,
+        "line=" .. line
+    )
+
+    if type(getconstants) == "function" then
+        local ok, constants = pcall(getconstants, fn)
+        if ok then
+            append(
+                file,
+                "CONSTANTS=",
+                clip(serialize(constants), 25000)
+            )
         end
     end
-end
 
-for _, getterName in ipairs({"getrunningscripts", "getscripts"}) do
-    local getter = getgenv()[getterName]
-    if type(getter) == "function" then
-        local ok, scripts = pcall(getter)
-        if ok and type(scripts) == "table" then
-            for index, inst in ipairs(scripts) do
-                addScript(inst, getterName)
-                if index % 500 == 0 then task.wait() end
+    if type(getupvalues) == "function" then
+        local ok, upvalues = pcall(getupvalues, fn)
+        if ok then
+            append(
+                file,
+                "UPVALUES=",
+                clip(serialize(upvalues), 50000)
+            )
+        end
+    end
+
+    if type(getprotos) == "function" then
+        local ok, protos = pcall(getprotos, fn)
+        if ok and type(protos) == "table" then
+            local meta = {}
+
+            for i, proto in ipairs(protos) do
+                if i > 50 then
+                    break
+                end
+
+                local pName, pSource = "", ""
+                if type(debug) == "table"
+                    and type(debug.info) == "function" then
+                    pcall(function()
+                        pName = tostring(debug.info(proto, "n") or "")
+                        pSource = tostring(debug.info(proto, "s") or "")
+                    end)
+                end
+
+                table.insert(meta, {
+                    index = i,
+                    name = pName,
+                    source = pSource,
+                })
             end
+
+            append(file, "PROTOS=", serialize(meta))
         end
     end
 end
 
-table.sort(scriptList, function(a, b)
-    return a.Path < b.Path
+local function walkFunctions(file, label, value, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+
+    if depth > 8 then
+        return
+    end
+
+    if type(value) == "function" then
+        dumpFunction(file, label, value)
+        return
+    end
+
+    if type(value) ~= "table" or seen[value] then
+        return
+    end
+    seen[value] = true
+
+    for k, v in pairs(value) do
+        local child = label .. "." .. tostring(k)
+        if type(v) == "function" then
+            dumpFunction(file, child, v)
+        elseif type(v) == "table" then
+            walkFunctions(file, child, v, depth + 1, seen)
+        end
+    end
+end
+
+--------------------------------------------------
+-- RELEVANT MODULES
+--------------------------------------------------
+
+stage("1/5 Requiring relevant config/data modules")
+
+local wantedNames = {
+    ["BuyMaxCategories"] = true,
+    ["Upgrades"] = true,
+    ["Resets"] = true,
+    ["Stats"] = true,
+    ["GameConfig"] = true,
+    ["Shop"] = true,
+    ["Reveals"] = true,
+    ["Achievements"] = true,
+    ["Challenges"] = true,
+    ["QuestRewards"] = true,
+    ["Quests"] = true,
+    ["Portals"] = true,
+    ["Formulas"] = true,
+    ["Remotes"] = true,
+    ["DataTemplate"] = true,
+    ["SettingsDataTemplate"] = true,
+}
+
+local modules = {}
+
+for _, object in ipairs(ReplicatedStorage:GetDescendants()) do
+    if object:IsA("ModuleScript") then
+        if wantedNames[object.Name] or relevant(fullName(object)) then
+            table.insert(modules, object)
+        end
+    end
+end
+
+table.sort(modules, function(a, b)
+    return fullName(a) < fullName(b)
 end)
 
-append(S.Files.Summary, "Unique scripts/modules:", #scriptList)
+section(M.Files.Config, "REQUIRED MODULE RETURNS")
 
-stage("2/6 Decompiling + scoring scripts")
+local requiredCount = 0
 
-section(S.Files.Decompiled, "DECOMPILED CLIENT SCRIPTS")
-section(S.Files.Matches, "KEYWORD MATCHES")
+for index, module in ipairs(modules) do
+    append(M.Files.Config, "")
+    append(M.Files.Config, "------------------------------------------------------------")
+    append(M.Files.Config, "MODULE", index, fullName(module))
+    append(M.Files.Config, "------------------------------------------------------------")
 
-local matchedScripts = 0
-local decompiledCount = 0
+    local ok, result = pcall(require, module)
 
-for index, info in ipairs(scriptList) do
-    local source = nil
-
-    if type(decompile) == "function" then
-        local ok, result = pcall(decompile, info.Instance)
-        if ok and type(result) == "string" then
-            source = result
-            decompiledCount += 1
-        end
-    end
-
-    local combined = info.Path .. "\n" .. tostring(info.Instance.Name)
-        .. "\n" .. tostring(source or "")
-
-    local score, hits = scoreText(combined)
-
-    append(S.Files.Decompiled, "")
-    append(S.Files.Decompiled, "------------------------------------------------------------")
-    append(
-        S.Files.Decompiled,
-        "SCRIPT", index, "/", #scriptList,
-        info.Path,
-        "| source=" .. tostring(info.Source),
-        "| keywordScore=" .. tostring(score),
-        "| hits=" .. hitsText(hits)
-    )
-    append(S.Files.Decompiled, "------------------------------------------------------------")
-
-    local attrs = {}
-    pcall(function()
-        attrs = info.Instance:GetAttributes()
-    end)
-    append(S.Files.Decompiled, "ATTRS=", serialize(attrs))
-
-    if source then
-        append(S.Files.Decompiled, source)
-    else
-        append(S.Files.Decompiled, "[decompile unavailable/failed]")
-    end
-
-    if score > 0 then
-        matchedScripts += 1
+    if ok then
+        requiredCount += 1
         append(
-            S.Files.Matches,
-            "SCRIPT", matchedScripts,
-            "score=" .. tostring(score),
-            "hits=" .. hitsText(hits),
-            "path=" .. info.Path,
-            "source=" .. tostring(info.Source)
+            M.Files.Config,
+            "RETURN=",
+            clip(serialize(result), 150000)
         )
+
+        walkFunctions(
+            M.Files.Config,
+            fullName(module),
+            result,
+            0,
+            {}
+        )
+    else
+        append(M.Files.Config, "REQUIRE_ERROR=", tostring(result))
     end
 
     task.wait()
 end
 
-append(S.Files.Summary, "Decompiled:", decompiledCount)
-append(S.Files.Summary, "Matched scripts:", matchedScripts)
+append(M.Files.Summary, "Required modules:", requiredCount, "/", #modules)
 
-stage("3/6 Scanning remotes")
+--------------------------------------------------
+-- STATE TEMPLATES / LIVE VALUE OBJECTS
+--------------------------------------------------
 
-section(S.Files.Remotes, "REMOTE INVENTORY")
-local remoteCount = 0
-local remoteMatches = 0
+stage("2/5 State/templates/value objects")
 
-for index, object in ipairs(ReplicatedStorage:GetDescendants()) do
-    if object:IsA("RemoteEvent")
-        or object:IsA("RemoteFunction")
-        or object.ClassName == "UnreliableRemoteEvent" then
+section(M.Files.State, "PLAYER + REPLICATED STATE CANDIDATES")
 
-        remoteCount += 1
+local stateCount = 0
+local stateRoots = {
+    player,
+    ReplicatedStorage,
+}
+
+for _, root in ipairs(stateRoots) do
+    local objects = {root}
+    for _, object in ipairs(root:GetDescendants()) do
+        table.insert(objects, object)
+    end
+
+    for index, object in ipairs(objects) do
+        local path = fullName(object)
+
+        local valueText = ""
+        if object:IsA("ValueBase") then
+            local ok, value = pcall(function()
+                return object.Value
+            end)
+            if ok then
+                valueText = tostring(value)
+            end
+        end
+
         local attrs = {}
         pcall(function()
             attrs = object:GetAttributes()
         end)
 
-        local score, hits = scoreText(fullName(object) .. " " .. serialize(attrs))
+        local blob =
+            path
+            .. " "
+            .. object.Name
+            .. " "
+            .. valueText
+            .. " "
+            .. serialize(attrs)
 
-        append(
-            S.Files.Remotes,
-            remoteCount,
-            object.ClassName,
-            fullName(object),
-            "score=" .. tostring(score),
-            "hits=" .. hitsText(hits),
-            "attrs=" .. serialize(attrs)
-        )
-
-        if score > 0 then
-            remoteMatches += 1
-        end
-    end
-
-    if index % 1000 == 0 then task.wait() end
-end
-
-append(S.Files.Summary, "Remotes:", remoteCount)
-append(S.Files.Summary, "Matched remotes:", remoteMatches)
-
-stage("4/6 Scanning UI")
-
-section(S.Files.UI, "UI MATCHES")
-local uiMatches = 0
-
-for index, object in ipairs(PlayerGui:GetDescendants()) do
-    local text = nil
-    if object:IsA("TextLabel")
-        or object:IsA("TextButton")
-        or object:IsA("TextBox") then
-        text = object.Text
-    end
-
-    local blob = fullName(object)
-        .. " " .. tostring(object.Name)
-        .. " " .. tostring(text or "")
-
-    local score, hits = scoreText(blob)
-
-    if score > 0 then
-        uiMatches += 1
-        local extras = {}
-
-        if object:IsA("GuiObject") then
-            table.insert(extras, "Visible=" .. tostring(object.Visible))
-            table.insert(extras, "AbsPos=" .. tostring(object.AbsolutePosition))
-            table.insert(extras, "AbsSize=" .. tostring(object.AbsoluteSize))
+        if relevant(blob) then
+            stateCount += 1
+            append(
+                M.Files.State,
+                stateCount,
+                object.ClassName,
+                path,
+                "VALUE=" .. valueText,
+                "ATTRS=" .. clip(serialize(attrs), 10000)
+            )
         end
 
-        if text then
-            table.insert(extras, "Text=" .. string.format("%q", clip(text, 1500)))
+        if index % 1000 == 0 then
+            task.wait()
         end
-
-        append(
-            S.Files.UI,
-            "UI", uiMatches,
-            "score=" .. tostring(score),
-            "hits=" .. hitsText(hits),
-            object.ClassName,
-            fullName(object),
-            table.concat(extras, " | ")
-        )
-    end
-
-    if index % 600 == 0 then task.wait() end
-end
-
-append(S.Files.Summary, "Matched UI:", uiMatches)
-
-stage("5/6 Scanning getgc tables")
-
-section(S.Files.GC, "GETGC TABLE MATCHES")
-local gcObjects = nil
-
-if type(getgc) == "function" then
-    local ok, result = pcall(getgc, true)
-    if ok and type(result) == "table" then
-        gcObjects = result
     end
 end
 
-local gcTableMatches = 0
+append(M.Files.Summary, "State candidates:", stateCount)
 
-if gcObjects then
-    for index, object in ipairs(gcObjects) do
-        if type(object) == "table" then
-            local ok, result = pcall(serialize, object, 0, {})
-            if ok and type(result) == "string" then
-                local score, hits = scoreText(result)
+--------------------------------------------------
+-- RELEVANT UI CALLBACKS
+--------------------------------------------------
 
-                if score > 0 then
-                    gcTableMatches += 1
-                    append(
-                        S.Files.GC,
-                        "",
-                        "GC TABLE", gcTableMatches,
-                        "score=" .. tostring(score),
-                        "hits=" .. hitsText(hits)
-                    )
-                    append(S.Files.GC, clip(result, 40000))
+stage("3/5 Relevant GUI callbacks")
+
+section(M.Files.Connections, "RELEVANT GUI BUTTON CALLBACKS")
+
+local buttonCount = 0
+local connectionCount = 0
+
+if type(getconnections) == "function" then
+    for index, object in ipairs(playerGui:GetDescendants()) do
+        if object:IsA("GuiButton") then
+            local textBlob = fullName(object) .. " " .. object.Name
+
+            for _, child in ipairs(object:GetDescendants()) do
+                if child:IsA("TextLabel")
+                    or child:IsA("TextButton")
+                    or child:IsA("TextBox") then
+                    textBlob = textBlob .. " " .. tostring(child.Text)
                 end
             end
-        end
 
-        if index % 700 == 0 then task.wait() end
-    end
-end
-
-append(S.Files.Summary, "Matched GC tables:", gcTableMatches)
-
-stage("6/6 Scanning getgc function constants/upvalues")
-
-section(S.Files.GC, "GETGC FUNCTION MATCHES")
-local gcFunctionMatches = 0
-
-if gcObjects then
-    for index, object in ipairs(gcObjects) do
-        if type(object) == "function" then
-            local name = ""
-            local sourcePath = ""
-
-            if type(debug) == "table" and type(debug.info) == "function" then
-                pcall(function()
-                    name = tostring(debug.info(object, "n") or "")
-                    sourcePath = tostring(debug.info(object, "s") or "")
-                end)
+            if object:IsA("TextButton") then
+                textBlob = textBlob .. " " .. tostring(object.Text)
             end
 
-            local constants = nil
-            local upvalues = nil
+            if relevant(textBlob) then
+                buttonCount += 1
 
-            if type(getconstants) == "function" then
-                pcall(function()
-                    constants = getconstants(object)
-                end)
-            end
-
-            if type(getupvalues) == "function" then
-                pcall(function()
-                    upvalues = getupvalues(object)
-                end)
-            end
-
-            local blob = name .. "\n" .. sourcePath .. "\n"
-                .. (constants and serialize(constants) or "")
-                .. "\n"
-                .. (upvalues and serialize(upvalues) or "")
-
-            local score, hits = scoreText(blob)
-
-            if score > 0 then
-                gcFunctionMatches += 1
-
+                append(M.Files.Connections, "")
                 append(
-                    S.Files.GC,
-                    "",
-                    "GC FUNCTION", gcFunctionMatches,
-                    "score=" .. tostring(score),
-                    "hits=" .. hitsText(hits),
-                    "name=" .. name,
-                    "source=" .. sourcePath
+                    M.Files.Connections,
+                    "BUTTON",
+                    buttonCount,
+                    fullName(object),
+                    "TEXTBLOB=" .. string.format("%q", clip(textBlob, 3000))
                 )
 
-                if constants then
-                    append(S.Files.GC, "CONSTANTS=", clip(serialize(constants), 20000))
-                end
+                local signals = {
+                    {"Activated", object.Activated},
+                }
 
-                if upvalues then
-                    append(S.Files.GC, "UPVALUES=", clip(serialize(upvalues), 30000))
+                pcall(function()
+                    table.insert(
+                        signals,
+                        {"MouseButton1Click", object.MouseButton1Click}
+                    )
+                    table.insert(
+                        signals,
+                        {"MouseButton1Down", object.MouseButton1Down}
+                    )
+                end)
+
+                for _, signalInfo in ipairs(signals) do
+                    local ok, connections = pcall(
+                        getconnections,
+                        signalInfo[2]
+                    )
+
+                    if ok and type(connections) == "table" then
+                        append(
+                            M.Files.Connections,
+                            "SIGNAL",
+                            signalInfo[1],
+                            "count=" .. tostring(#connections)
+                        )
+
+                        for i, connection in ipairs(connections) do
+                            if i > 30 then break end
+
+                            local fn = nil
+                            pcall(function()
+                                fn = connection.Function
+                            end)
+
+                            connectionCount += 1
+
+                            if type(fn) == "function" then
+                                dumpFunction(
+                                    M.Files.Connections,
+                                    fullName(object)
+                                        .. "."
+                                        .. signalInfo[1]
+                                        .. "#"
+                                        .. tostring(i),
+                                    fn
+                                )
+                            else
+                                append(
+                                    M.Files.Connections,
+                                    "CONNECTION",
+                                    i,
+                                    "no exposed Function"
+                                )
+                            end
+                        end
+                    end
                 end
             end
         end
 
-        if index % 450 == 0 then task.wait() end
+        if index % 300 == 0 then
+            task.wait()
+        end
     end
 end
 
-append(S.Files.Summary, "Matched GC functions:", gcFunctionMatches)
+append(M.Files.Summary, "Relevant buttons:", buttonCount)
+append(M.Files.Summary, "Connection functions inspected:", connectionCount)
 
-section(S.Files.Summary, "FINAL")
-append(S.Files.Summary, "Scripts:", #scriptList)
-append(S.Files.Summary, "Decompiled:", decompiledCount)
-append(S.Files.Summary, "Matched scripts:", matchedScripts)
-append(S.Files.Summary, "Remotes:", remoteCount)
-append(S.Files.Summary, "Matched remotes:", remoteMatches)
-append(S.Files.Summary, "Matched UI:", uiMatches)
-append(S.Files.Summary, "Matched GC tables:", gcTableMatches)
-append(S.Files.Summary, "Matched GC functions:", gcFunctionMatches)
-append(S.Files.Summary, "Finished UTC:", now())
+--------------------------------------------------
+-- SCRIPT ENVIRONMENTS / CLOSURES
+--------------------------------------------------
 
-warn("[AutoResearch] PC Scanner V1 COMPLETE")
-warn("[AutoResearch] Upload AUTO_SCAN_*.txt or zip them.")
+stage("4/5 Controller environments/closures")
+
+section(M.Files.Connections, "RELEVANT CONTROLLER ENVIRONMENTS")
+
+local controllerCount = 0
+
+for _, object in ipairs(player:FindFirstChild("PlayerScripts")
+        and player.PlayerScripts:GetDescendants()
+        or {}) do
+
+    if object:IsA("LocalScript")
+        and relevant(fullName(object)) then
+
+        controllerCount += 1
+
+        append(M.Files.Connections, "")
+        append(
+            M.Files.Connections,
+            "CONTROLLER",
+            controllerCount,
+            fullName(object)
+        )
+
+        if type(getsenv) == "function" then
+            local ok, env = pcall(getsenv, object)
+            if ok then
+                append(
+                    M.Files.Connections,
+                    "ENV=",
+                    clip(serialize(env), 60000)
+                )
+                walkFunctions(
+                    M.Files.Connections,
+                    fullName(object) .. ".ENV",
+                    env,
+                    0,
+                    {}
+                )
+            else
+                append(
+                    M.Files.Connections,
+                    "getsenv error=",
+                    tostring(env)
+                )
+            end
+        end
+
+        for _, getterName in ipairs({
+            "getscriptclosure",
+            "getscriptfunction",
+        }) do
+            local getter = getgenv()[getterName]
+
+            if type(getter) == "function" then
+                local ok, fn = pcall(getter, object)
+
+                if ok and type(fn) == "function" then
+                    dumpFunction(
+                        M.Files.Connections,
+                        fullName(object) .. "." .. getterName,
+                        fn
+                    )
+                end
+            end
+        end
+    end
+end
+
+append(M.Files.Summary, "Relevant controllers:", controllerCount)
+
+--------------------------------------------------
+-- DIRECT REMOTE REFERENCES IN GC FUNCTIONS
+--------------------------------------------------
+
+stage("5/5 Mapping direct remote references")
+
+section(M.Files.RemoteRefs, "REMOTE REFERENCES FROM GC FUNCTIONS")
+
+local remotes = {}
+local remoteByInstance = {}
+
+for _, object in ipairs(ReplicatedStorage:GetDescendants()) do
+    if object:IsA("RemoteEvent")
+        or object:IsA("RemoteFunction")
+        or object.ClassName == "UnreliableRemoteEvent" then
+
+        table.insert(remotes, object)
+        remoteByInstance[object] = true
+    end
+end
+
+for i, remote in ipairs(remotes) do
+    append(
+        M.Files.RemoteRefs,
+        "REMOTE",
+        i,
+        remote.ClassName,
+        fullName(remote)
+    )
+end
+
+local function tableContainsRemote(tbl, depth, seen)
+    depth = depth or 0
+    seen = seen or {}
+
+    if depth > 3 or type(tbl) ~= "table" or seen[tbl] then
+        return nil
+    end
+    seen[tbl] = true
+
+    for k, v in pairs(tbl) do
+        if typeof(v) == "Instance" and remoteByInstance[v] then
+            return v
+        elseif type(v) == "table" then
+            local found = tableContainsRemote(
+                v,
+                depth + 1,
+                seen
+            )
+            if found then
+                return found
+            end
+        end
+
+        if typeof(k) == "Instance" and remoteByInstance[k] then
+            return k
+        end
+    end
+
+    return nil
+end
+
+local mapped = 0
+
+if type(getgc) == "function" then
+    local ok, objects = pcall(getgc, true)
+
+    if ok and type(objects) == "table" then
+        for index, object in ipairs(objects) do
+            if type(object) == "function"
+                and type(getupvalues) == "function" then
+
+                local okUp, upvalues = pcall(
+                    getupvalues,
+                    object
+                )
+
+                if okUp and type(upvalues) == "table" then
+                    local foundRemote = nil
+
+                    for _, value in pairs(upvalues) do
+                        if typeof(value) == "Instance"
+                            and remoteByInstance[value] then
+                            foundRemote = value
+                            break
+                        elseif type(value) == "table" then
+                            foundRemote = tableContainsRemote(
+                                value,
+                                0,
+                                {}
+                            )
+                            if foundRemote then break end
+                        end
+                    end
+
+                    if foundRemote then
+                        mapped += 1
+                        append(M.Files.RemoteRefs, "")
+                        append(
+                            M.Files.RemoteRefs,
+                            "REMOTE_REF_FUNCTION",
+                            mapped,
+                            "remote=" .. fullName(foundRemote)
+                        )
+
+                        dumpFunction(
+                            M.Files.RemoteRefs,
+                            "gc#" .. tostring(index),
+                            object
+                        )
+                    end
+                end
+            end
+
+            if index % 350 == 0 then
+                task.wait()
+            end
+        end
+    end
+end
+
+append(M.Files.Summary, "GC functions with direct remote refs:", mapped)
+
+section(M.Files.Summary, "DONE")
+append(M.Files.Summary, "Upload all AUTO_DEEP_*.txt files.")
+append(M.Files.Summary, "Finished UTC:", os.date("!%Y-%m-%dT%H:%M:%SZ"))
+
+warn("[AutoDeep] PC V2 COMPLETE")
+warn("[AutoDeep] Upload AUTO_DEEP_*.txt files.")
