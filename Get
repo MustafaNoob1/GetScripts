@@ -1,723 +1,318 @@
-warn("[AutoTrace] PC V3 START")
-
--- AUTOMATION TARGETED TRACE - PC V3
--- Read-only diagnostic for the automation project.
---
--- Fixes the V2 blind spot: the interesting controllers are ModuleScripts,
--- not LocalScripts. V3 requires/introspects those modules and passively logs
--- the game's OWN outbound remote calls while you perform normal actions.
---
--- It DOES NOT call FireServer/InvokeServer itself and does not buy/reset.
---
--- After running this script, manually do each action ONCE:
---   1) Buy one normal upgrade
---   2) Use Buy Max once
---   3) Press a Keycap once
---   4) Trigger/observe a Star Level gain if possible
---   5) Prestige once
---   6) Steel once
---   7) Space Prestige once
---   8) Loop once
---   9) Supernova once if unlocked
---
--- Then run:
---   getgenv().AutomationTrace:Stop()
---
--- Upload:
---   AUTO_TRACE_Summary.txt
---   AUTO_TRACE_Controllers.txt
---   AUTO_TRACE_WorldUI.txt
---   AUTO_TRACE_Remotes.txt
-
-local T = {}
-getgenv().AutomationTrace = T
-
-T.Enabled = true
-T.Started = os.clock()
+-- AutoLoop ONLY V2 | scanned game (no auto-buy, no currency edits)
+-- Auto-triggers the normal LoopEvent when the live Level reaches the next
+-- loop requirement. Uses a reply-check/backoff instead of spamming requests.
 
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
-
+local RS = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
-local playerScripts = player:WaitForChild("PlayerScripts")
 
-T.Files = {
-    Summary = "AUTO_TRACE_Summary.txt",
-    Controllers = "AUTO_TRACE_Controllers.txt",
-    WorldUI = "AUTO_TRACE_WorldUI.txt",
-    Remotes = "AUTO_TRACE_Remotes.txt",
+if not player then
+    warn("[AutoLoop] LocalPlayer unavailable")
+    return
+end
+
+local env = (type(getgenv) == "function" and getgenv()) or _G
+if type(env.AutoLoop) == "table" and type(env.AutoLoop.Unload) == "function" then
+    pcall(function() env.AutoLoop:Unload() end)
+end
+
+local B = {
+    Alive = true,
+    Enabled = true,
+    CheckInterval = 0.35,
+    AckTimeout = 3.0,
+    RetryDelay = 7.0,
+    Cooldown = 0.65,
+    LastSend = -math.huge,
+    LastLoopValue = nil,
+    LastLevelValue = nil,
+    NextRequiredLevel = nil,
+    SendCount = 0,
+    ConfirmedCount = 0,
+    StatusText = "Starte...",
+    Pending = false,
+    PendingOldLoops = nil,
+    PendingAt = 0,
+    BlockUntil = 0,
+    GUI = nil,
 }
+env.AutoLoop = B
 
-T.TargetRemoteNames = {
-    GetUpgradeInfo = true,
-    UpdateUpgrade = true,
-    BuyMaxEvent = true,
-    BuyOneEvent = true,
-    KeycapPressed = true,
-    StarExperienceGain = true,
-    LoopEvent = true,
-    SupernovaEvent = true,
-    SupernovaRespecEvent = true,
-    UpdateSetting = true,
-    TeleportEvent = true,
-}
+local values = player:WaitForChild("Values", 15)
+local remotes = RS:WaitForChild("Remotes", 15)
+local remote = remotes and remotes:FindFirstChild("LoopEvent")
 
-T.ControllerNames = {
-    ClientMain = true,
-    CurrencyHUDController = true,
-    KeycapController = true,
-    LoopController = true,
-    StarLevelController = true,
-    UpgradeInputController = true,
-    UpgradeVisualsController = true,
-    SettingsController = true,
-    SupernovaBoardController = true,
-    SupernovaChallengeController = true,
-    RevealController = true,
-    TeleportUIController = true,
-}
-
-T.WorldKeywords = {
-    "prestige",
-    "steel",
-    "spaceprestige",
-    "space prestige",
-    "loop",
-    "supernova",
-    "keycap",
-    "upgrade",
-    "darkboard",
-    "starlevel",
-    "star level",
-    "autobuyer",
-    "auto buyer",
-}
-
---------------------------------------------------
--- HELPERS
---------------------------------------------------
-
-local function now()
-    return os.date("!%Y-%m-%dT%H:%M:%SZ")
+if not values or not remote or not remote:IsA("RemoteEvent") then
+    warn("[AutoLoop] Values or ReplicatedStorage.Remotes.LoopEvent missing")
+    B.StatusText = "Fehler: Values / LoopEvent fehlt"
+    B.Alive = false
+    return
 end
 
-local function resetFile(name)
-    if type(writefile) == "function" then
-        pcall(writefile, name, "")
-    end
-end
-
-local function append(name, ...)
-    local parts = {}
-
-    for i = 1, select("#", ...) do
-        parts[i] = tostring(select(i, ...))
-    end
-
-    local line = table.concat(parts, " ") .. "\n"
-
-    if type(appendfile) == "function" then
-        local ok = pcall(appendfile, name, line)
-        if ok then
-            return
-        end
-    end
-
-    local old = ""
-
-    if type(isfile) == "function"
-        and type(readfile) == "function" then
-        pcall(function()
-            if isfile(name) then
-                old = readfile(name)
-            end
-        end)
-    end
-
-    if type(writefile) == "function" then
-        pcall(writefile, name, old .. line)
-    end
-end
-
-local function section(name, title)
-    append(name, "")
-    append(name, "============================================================")
-    append(name, title)
-    append(name, "============================================================")
-end
-
-local function fullName(inst)
-    local ok, result = pcall(function()
-        return inst:GetFullName()
-    end)
-
-    return ok and tostring(result) or tostring(inst)
-end
-
-local function clip(value, limit)
-    local s = tostring(value or "")
-    limit = limit or 5000
-
-    if #s > limit then
-        return s:sub(1, limit) .. "...<truncated>"
-    end
-
-    return s
-end
-
-local function serialize(value, depth, seen)
-    depth = depth or 0
-    seen = seen or {}
-
-    if depth > 8 then
-        return "<max-depth>"
-    end
-
-    local t = typeof(value)
-
-    if t == "nil" then
-        return "nil"
-    elseif t == "string" then
-        return string.format("%q", clip(value, 6000))
-    elseif t == "number" or t == "boolean" then
-        return tostring(value)
-    elseif t == "Instance" then
-        return "<Instance " .. fullName(value) .. ">"
-    elseif t == "function" then
-        local n, s = "", ""
-
-        if type(debug) == "table"
-            and type(debug.info) == "function" then
-            pcall(function()
-                n = tostring(debug.info(value, "n") or "")
-                s = tostring(debug.info(value, "s") or "")
-            end)
-        end
-
-        return "<function name=" .. n .. " source=" .. s .. ">"
-    elseif t ~= "table" then
-        return "<" .. t .. " " .. clip(value, 800) .. ">"
-    end
-
-    if seen[value] then
-        return "<cycle>"
-    end
-
-    seen[value] = true
-
-    local out = {}
-    local count = 0
-
-    for k, v in pairs(value) do
-        count += 1
-
-        if count > 800 then
-            table.insert(out, "<table-capped>")
-            break
-        end
-
-        table.insert(
-            out,
-            "["
-                .. serialize(k, depth + 1, seen)
-                .. "]="
-                .. serialize(v, depth + 1, seen)
-        )
-    end
-
-    seen[value] = nil
-
-    return "{" .. table.concat(out, ",") .. "}"
-end
-
-local function interestingName(value)
-    local s = string.lower(tostring(value or ""))
-
-    for _, keyword in ipairs(T.WorldKeywords) do
-        if string.find(s, keyword, 1, true) then
-            return true
-        end
-    end
-
-    return false
-end
-
-for _, file in pairs(T.Files) do
-    resetFile(file)
-end
-
-section(T.Files.Summary, "AUTOMATION TARGETED TRACE - PC V3")
-append(T.Files.Summary, "Started UTC:", now())
-append(T.Files.Summary, "PlaceId:", game.PlaceId)
-append(T.Files.Summary, "GameId:", game.GameId)
-
-local executor = "Unknown"
-
+local formulas, config, EN
 pcall(function()
-    if type(identifyexecutor) == "function" then
-        executor = tostring(select(1, identifyexecutor()) or "Unknown")
+    formulas = require(RS:WaitForChild("Shared"):WaitForChild("Formulas"))
+end)
+pcall(function()
+    config = require(RS.Shared.Config.GameConfig)
+end)
+pcall(function()
+    EN = require(RS.Shared.Libs.EternityNum)
+end)
+
+local function parseNumber(value)
+    if type(value) == "number" then
+        if value == value then return value end
+        return nil
+    end
+    if type(value) == "table" and EN then
+        local ok, numeric = pcall(function()
+            return EN.toNumber(value)
+        end)
+        if ok and type(numeric) == "number" and numeric == numeric then
+            return numeric
+        end
+    end
+    if type(value) == "string" then
+        -- This game replicates numbers as "layer;magnitude", e.g. "0;32".
+        local layer, magnitude = value:match("^%s*([^;]+)%s*;%s*(.-)%s*$")
+        layer, magnitude = tonumber(layer), tonumber(magnitude)
+        if layer ~= nil and magnitude ~= nil then
+            if layer == 0 then return magnitude end
+            if layer > 0 then return math.huge end  -- larger than any regular level target
+            return 0
+        end
+        return tonumber(value)
+    end
+    return nil
+end
+
+local function getValue(name)
+    local obj = values:FindFirstChild(name)
+    if not obj then return nil end
+    if obj:IsA("ValueBase") then
+        return parseNumber(obj.Value)
+    end
+    return nil
+end
+
+local function defaultRequirement(loops)
+    local base = 100
+    if type(config) == "table" and type(config.Thresholds) == "table" then
+        base = tonumber(config.Thresholds.LoopLevelsPerLoop) or base
+    end
+    return base * (loops + 1)
+end
+
+local function getRequirement(loops)
+    local expected = defaultRequirement(loops)
+    if type(formulas) ~= "table" or type(formulas.LoopRequirement) ~= "function" then
+        return expected, "config"
+    end
+    -- Prefer the game's exact formula, but reject implausible results from a
+    -- mismatched argument type. The scanner confirms 100 levels per loop.
+    local inputs = {loops, tostring(loops), "0;" .. tostring(loops)}
+    for _, input in ipairs(inputs) do
+        local ok, value = pcall(formulas.LoopRequirement, input)
+        if ok then
+            local n = parseNumber(value)
+            if n and n >= expected * 0.8 and n <= expected * 1.2 then
+                return n, "formula"
+            end
+        end
+    end
+    return expected, "config"
+end
+
+local function updateSnapshot()
+    local loops = getValue("Loops")
+    -- Level can be a replicated child of Values or (depending on game build)
+    -- a direct player value. We do not confuse StarLevels with Level.
+    local level = getValue("Level")
+    if level == nil then
+        local other = player:FindFirstChild("Level")
+        if other and other:IsA("ValueBase") then
+            level = parseNumber(other.Value)
+        end
+    end
+    B.LastLoopValue = loops
+    B.LastLevelValue = level
+    if loops == nil then
+        B.StatusText = "Warte auf Values.Loops"
+        return nil, nil
+    end
+    if level == nil then
+        B.StatusText = "Warte auf Level (Values.Level)"
+        return loops, nil
+    end
+    if loops < 0 or loops == math.huge then
+        B.StatusText = "Ungueltiger Loop-Wert"
+        return nil, nil
+    end
+    local target, source = getRequirement(loops)
+    B.NextRequiredLevel = target
+    B.RequirementSource = source
+    B.StatusText = string.format("Loops %s | Level %s/%s", tostring(loops), tostring(level), tostring(target))
+    return loops, level, target
+end
+
+local function buildGui()
+    local pg = player:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+    local old = pg:FindFirstChild("AutoLoopOnlyV2")
+    if old then old:Destroy() end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "AutoLoopOnlyV2"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = false
+    gui.DisplayOrder = 650
+    gui.Parent = pg
+    B.GUI = gui
+
+    local card = Instance.new("Frame")
+    card.Size = UDim2.fromOffset(286, 108)
+    card.Position = UDim2.new(1, -305, 0, 65)
+    card.BackgroundColor3 = Color3.fromRGB(23, 25, 34)
+    card.BorderSizePixel = 0
+    card.Parent = gui
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 9)
+    corner.Parent = card
+
+    local head = Instance.new("TextLabel")
+    head.BackgroundTransparency = 1
+    head.Position = UDim2.fromOffset(10, 7)
+    head.Size = UDim2.new(1, -110, 0, 23)
+    head.Text = "AUTO LOOP ONLY V2"
+    head.Font = Enum.Font.GothamBold
+    head.TextSize = 13
+    head.TextColor3 = Color3.fromRGB(235, 239, 250)
+    head.TextXAlignment = Enum.TextXAlignment.Left
+    head.Parent = card
+
+    local status = Instance.new("TextLabel")
+    status.BackgroundTransparency = 1
+    status.Position = UDim2.fromOffset(10, 36)
+    status.Size = UDim2.new(1, -18, 0, 63)
+    status.Text = "Warte auf Spielwerte ..."
+    status.Font = Enum.Font.Code
+    status.TextSize = 12
+    status.TextWrapped = true
+    status.TextColor3 = Color3.fromRGB(185, 195, 211)
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.TextYAlignment = Enum.TextYAlignment.Top
+    status.Parent = card
+
+    local toggle = Instance.new("TextButton")
+    toggle.Size = UDim2.fromOffset(91, 26)
+    toggle.Position = UDim2.new(1, -100, 0, 7)
+    toggle.BorderSizePixel = 0
+    toggle.Font = Enum.Font.GothamBold
+    toggle.TextSize = 12
+    toggle.TextColor3 = Color3.new(1, 1, 1)
+    toggle.Parent = card
+    local toggleCorner = Instance.new("UICorner")
+    toggleCorner.CornerRadius = UDim.new(0, 6)
+    toggleCorner.Parent = toggle
+
+    local function refresh()
+        toggle.Text = B.Enabled and "ON" or "OFF"
+        toggle.BackgroundColor3 = B.Enabled
+            and Color3.fromRGB(28, 132, 94)
+            or Color3.fromRGB(133, 49, 53)
+        status.Text = (B.StatusText or "-")
+            .. "\nEvents: " .. tostring(B.SendCount)
+            .. " | bestaetigt: " .. tostring(B.ConfirmedCount)
+            .. (B.Pending and " | wartet..." or "")
+    end
+
+    toggle.MouseButton1Click:Connect(function()
+        B.Enabled = not B.Enabled
+        B.Pending = false
+        B.BlockUntil = 0
+        refresh()
+    end)
+    B.UpdateGUI = refresh
+    refresh()
+end
+
+pcall(buildGui)
+
+function B:Status()
+    updateSnapshot()
+    local message = "[AutoLoop] " .. (self.StatusText or "-")
+        .. " | Enabled=" .. tostring(self.Enabled)
+        .. " | Events=" .. tostring(self.SendCount)
+        .. " | Confirmed=" .. tostring(self.ConfirmedCount)
+        .. " | Source=" .. tostring(self.RequirementSource)
+    print(message)
+    return message
+end
+function B:Stop()
+    self.Enabled = false
+    self.Pending = false
+    self.StatusText = "Pausiert"
+    if self.UpdateGUI then pcall(self.UpdateGUI) end
+end
+function B:Start()
+    self.Enabled = true
+    self.Pending = false
+    self.BlockUntil = 0
+end
+function B:Unload()
+    self.Alive = false
+    self.Enabled = false
+    if self.GUI then pcall(function() self.GUI:Destroy() end) end
+    self.GUI = nil
+end
+
+task.spawn(function()
+    while B.Alive do
+        local ok, err = pcall(function()
+            local loops, level, required = updateSnapshot()
+            if not B.Enabled then
+                B.StatusText = "Pausiert | " .. (B.StatusText or "")
+                return
+            end
+            if not (loops and level and required) then return end
+            if B.Pending then
+                if loops > (B.PendingOldLoops or loops) then
+                    B.ConfirmedCount = B.ConfirmedCount + 1
+                    B.Pending = false
+                    B.BlockUntil = os.clock() + 0.6
+                    B.StatusText = "LOOP BESTAETIGT! Loops=" .. tostring(loops)
+                    warn("[AutoLoop] Confirmed loop increase: " .. tostring(loops))
+                elseif os.clock() - B.PendingAt >= B.AckTimeout then
+                    -- Failed/no response: back off before attempting again.
+                    B.Pending = false
+                    B.BlockUntil = os.clock() + B.RetryDelay
+                    B.StatusText = "Keine Bestaetigung; erneuter Versuch spaeter"
+                end
+                return
+            end
+            if level < required or os.clock() < B.BlockUntil then return end
+            if os.clock() - B.LastSend < B.Cooldown then return end
+            B.LastSend = os.clock()
+            B.Pending = true
+            B.PendingOldLoops = loops
+            B.PendingAt = os.clock()
+            -- Reset is calculated and validated by the game's normal server handler.
+            -- The scan confirms this RemoteEvent is the loop trigger; the trace
+            -- did not establish any additional payload fields.
+            remote:FireServer()
+            B.SendCount = B.SendCount + 1
+            B.StatusText = "LoopEvent gesendet; warte auf Loops-Anstieg"
+            warn("[AutoLoop] LoopEvent sent at level=" .. tostring(level) .. " loops=" .. tostring(loops))
+        end)
+        if not ok then
+            B.StatusText = "Fehler: " .. tostring(err)
+            B.Pending = false
+            B.BlockUntil = os.clock() + B.RetryDelay
+        end
+        if B.UpdateGUI then pcall(B.UpdateGUI) end
+        task.wait(B.CheckInterval)
     end
 end)
 
-append(T.Files.Summary, "Executor:", executor)
-
---------------------------------------------------
--- FUNCTION DUMP
---------------------------------------------------
-
-local function dumpFunction(file, label, fn)
-    if type(fn) ~= "function" then
-        return
-    end
-
-    local name, source, line = "", "", ""
-
-    if type(debug) == "table"
-        and type(debug.info) == "function" then
-
-        pcall(function()
-            name = tostring(debug.info(fn, "n") or "")
-            source = tostring(debug.info(fn, "s") or "")
-            line = tostring(debug.info(fn, "l") or "")
-        end)
-    end
-
-    append(
-        file,
-        "FUNCTION",
-        label,
-        "name=" .. name,
-        "source=" .. source,
-        "line=" .. line
-    )
-
-    if type(getconstants) == "function" then
-        local ok, data = pcall(getconstants, fn)
-
-        if ok then
-            append(
-                file,
-                "CONSTANTS=",
-                clip(serialize(data), 30000)
-            )
-        end
-    end
-
-    if type(getupvalues) == "function" then
-        local ok, data = pcall(getupvalues, fn)
-
-        if ok then
-            append(
-                file,
-                "UPVALUES=",
-                clip(serialize(data), 70000)
-            )
-        end
-    end
-
-    if type(getprotos) == "function" then
-        local ok, protos = pcall(getprotos, fn)
-
-        if ok and type(protos) == "table" then
-            local meta = {}
-
-            for i, proto in ipairs(protos) do
-                if i > 80 then
-                    break
-                end
-
-                local pn, ps = "", ""
-
-                if type(debug) == "table"
-                    and type(debug.info) == "function" then
-                    pcall(function()
-                        pn = tostring(debug.info(proto, "n") or "")
-                        ps = tostring(debug.info(proto, "s") or "")
-                    end)
-                end
-
-                table.insert(meta, {
-                    index = i,
-                    name = pn,
-                    source = ps,
-                })
-            end
-
-            append(file, "PROTOS=", serialize(meta))
-        end
-    end
-end
-
-local function walkFunctions(file, label, value, depth, seen)
-    depth = depth or 0
-    seen = seen or {}
-
-    if depth > 8 then
-        return
-    end
-
-    if type(value) == "function" then
-        dumpFunction(file, label, value)
-        return
-    end
-
-    if type(value) ~= "table" or seen[value] then
-        return
-    end
-
-    seen[value] = true
-
-    for k, v in pairs(value) do
-        local childLabel = label .. "." .. tostring(k)
-
-        if type(v) == "function" then
-            dumpFunction(file, childLabel, v)
-        elseif type(v) == "table" then
-            walkFunctions(
-                file,
-                childLabel,
-                v,
-                depth + 1,
-                seen
-            )
-        end
-    end
-end
-
---------------------------------------------------
--- CONTROLLER MODULES
---------------------------------------------------
-
-section(T.Files.Controllers, "TARGET CONTROLLER MODULES")
-
-local controllersFolder = playerScripts:FindFirstChild("Controllers")
-local controllerCount = 0
-
-if controllersFolder then
-    for _, module in ipairs(controllersFolder:GetChildren()) do
-        if module:IsA("ModuleScript")
-            and T.ControllerNames[module.Name] then
-
-            controllerCount += 1
-
-            append(T.Files.Controllers, "")
-            append(
-                T.Files.Controllers,
-                "------------------------------------------------------------"
-            )
-            append(
-                T.Files.Controllers,
-                "CONTROLLER",
-                controllerCount,
-                fullName(module)
-            )
-            append(
-                T.Files.Controllers,
-                "------------------------------------------------------------"
-            )
-
-            local ok, returned = pcall(require, module)
-
-            if ok then
-                append(
-                    T.Files.Controllers,
-                    "RETURN=",
-                    clip(serialize(returned), 90000)
-                )
-
-                walkFunctions(
-                    T.Files.Controllers,
-                    fullName(module) .. ".RETURN",
-                    returned,
-                    0,
-                    {}
-                )
-            else
-                append(
-                    T.Files.Controllers,
-                    "REQUIRE_ERROR=",
-                    tostring(returned)
-                )
-            end
-
-            for _, getterName in ipairs({
-                "getscriptclosure",
-                "getscriptfunction",
-            }) do
-                local getter = getgenv()[getterName]
-
-                if type(getter) == "function" then
-                    local okGetter, fn = pcall(getter, module)
-
-                    if okGetter and type(fn) == "function" then
-                        dumpFunction(
-                            T.Files.Controllers,
-                            fullName(module) .. "." .. getterName,
-                            fn
-                        )
-                    end
-                end
-            end
-
-            task.wait()
-        end
-    end
-end
-
-append(T.Files.Summary, "Controllers inspected:", controllerCount)
-
---------------------------------------------------
--- WORLD UI / CLICKABLES
---------------------------------------------------
-
-section(T.Files.WorldUI, "RELEVANT WORKSPACE INTERACTION OBJECTS")
-
-local worldObjects = 0
-local exposedConnections = 0
-
-for index, object in ipairs(Workspace:GetDescendants()) do
-    local blob = fullName(object) .. " " .. object.Name
-
-    if interestingName(blob) then
-        local supported = object:IsA("GuiButton")
-            or object:IsA("ClickDetector")
-            or object:IsA("ProximityPrompt")
-            or object:IsA("BasePart")
-
-        if supported then
-            worldObjects += 1
-
-            append(T.Files.WorldUI, "")
-            append(
-                T.Files.WorldUI,
-                "OBJECT",
-                worldObjects,
-                object.ClassName,
-                fullName(object),
-                "ATTRS=" .. serialize(object:GetAttributes())
-            )
-
-            if type(getconnections) == "function" then
-                local signals = {}
-
-                if object:IsA("GuiButton") then
-                    table.insert(signals, {"Activated", object.Activated})
-
-                    pcall(function()
-                        table.insert(
-                            signals,
-                            {"MouseButton1Click", object.MouseButton1Click}
-                        )
-                    end)
-
-                elseif object:IsA("ClickDetector") then
-                    table.insert(signals, {"MouseClick", object.MouseClick})
-
-                elseif object:IsA("ProximityPrompt") then
-                    table.insert(signals, {"Triggered", object.Triggered})
-                end
-
-                for _, signalInfo in ipairs(signals) do
-                    local ok, connections = pcall(
-                        getconnections,
-                        signalInfo[2]
-                    )
-
-                    if ok and type(connections) == "table" then
-                        append(
-                            T.Files.WorldUI,
-                            "SIGNAL",
-                            signalInfo[1],
-                            "count=" .. tostring(#connections)
-                        )
-
-                        for i, connection in ipairs(connections) do
-                            local fn = nil
-
-                            pcall(function()
-                                fn = connection.Function
-                            end)
-
-                            if type(fn) == "function" then
-                                exposedConnections += 1
-
-                                dumpFunction(
-                                    T.Files.WorldUI,
-                                    fullName(object)
-                                        .. "."
-                                        .. signalInfo[1]
-                                        .. "#"
-                                        .. tostring(i),
-                                    fn
-                                )
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if index % 800 == 0 then
-        task.wait()
-    end
-end
-
-append(T.Files.Summary, "Relevant world interaction objects:", worldObjects)
-append(T.Files.Summary, "Exposed world callbacks:", exposedConnections)
-
---------------------------------------------------
--- PASSIVE REMOTE TRACE
---------------------------------------------------
-
-section(T.Files.Remotes, "PASSIVE OUTBOUND REMOTE TRACE")
-append(
-    T.Files.Remotes,
-    "Only calls made by the GAME while tracing are logged."
-)
-
-local remoteFolder = ReplicatedStorage:FindFirstChild("Remotes")
-local targetInstances = {}
-
-if remoteFolder then
-    for _, object in ipairs(remoteFolder:GetChildren()) do
-        if T.TargetRemoteNames[object.Name]
-            and (
-                object:IsA("RemoteEvent")
-                or object:IsA("RemoteFunction")
-            ) then
-
-            targetInstances[object] = true
-
-            append(
-                T.Files.Remotes,
-                "WATCH",
-                object.ClassName,
-                fullName(object)
-            )
-        end
-    end
-end
-
-local function callingScriptText()
-    if type(getcallingscript) == "function" then
-        local ok, scriptInst = pcall(getcallingscript)
-
-        if ok and scriptInst then
-            return fullName(scriptInst)
-        end
-    end
-
-    return "unknown"
-end
-
-local function logRemote(remote, method, args)
-    append(
-        T.Files.Remotes,
-        "",
-        "[" .. now() .. "]",
-        method,
-        fullName(remote),
-        "caller=" .. callingScriptText(),
-        "argc=" .. tostring(args.n or #args)
-    )
-
-    for i = 1, (args.n or #args) do
-        append(
-            T.Files.Remotes,
-            "ARG",
-            i,
-            "=",
-            clip(serialize(args[i]), 30000)
-        )
-    end
-end
-
-T.HookInstalled = false
-
-if type(hookmetamethod) == "function"
-    and type(getnamecallmethod) == "function"
-    and type(newcclosure) == "function" then
-
-    local oldNamecall
-
-    oldNamecall = hookmetamethod(
-        game,
-        "__namecall",
-        newcclosure(function(self, ...)
-            local method = getnamecallmethod()
-
-            if T.Enabled
-                and targetInstances[self]
-                and (
-                    method == "FireServer"
-                    or method == "InvokeServer"
-                ) then
-
-                local args = table.pack(...)
-
-                pcall(function()
-                    logRemote(self, method, args)
-                end)
-            end
-
-            return oldNamecall(self, ...)
-        end)
-    )
-
-    T.HookInstalled = true
-
-    append(
-        T.Files.Summary,
-        "Passive namecall trace:",
-        "installed"
-    )
-else
-    append(
-        T.Files.Summary,
-        "Passive namecall trace:",
-        "UNAVAILABLE"
-    )
-end
-
---------------------------------------------------
--- CONTROL
---------------------------------------------------
-
-function T:Mark(label)
-    append(
-        self.Files.Remotes,
-        "",
-        "[" .. now() .. "] MARK",
-        tostring(label or "manual")
-    )
-end
-
-function T:Stop()
-    if not self.Enabled then
-        return
-    end
-
-    self.Enabled = false
-
-    section(self.Files.Summary, "FINAL")
-    append(self.Files.Summary, "Stopped UTC:", now())
-    append(
-        self.Files.Summary,
-        "Runtime seconds:",
-        string.format("%.2f", os.clock() - self.Started)
-    )
-    append(
-        self.Files.Summary,
-        "Hook installed:",
-        tostring(self.HookInstalled)
-    )
-
-    warn("[AutoTrace] STOPPED")
-    warn("[AutoTrace] Upload AUTO_TRACE_*.txt files.")
-end
-
-warn("[AutoTrace] PC V3 READY")
-warn("[AutoTrace] Perform each normal buy/reset action once.")
-warn("[AutoTrace] Then run: getgenv().AutomationTrace:Stop()")
+warn("[AutoLoop] V2 ready | no purchase automation | use getgenv().AutoLoop:Status()")
